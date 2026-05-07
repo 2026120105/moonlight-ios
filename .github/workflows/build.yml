@@ -11,25 +11,20 @@ jobs:
           repository: moonlight-stream/moonlight-ios
           submodules: recursive
           
-      - name: 📥 2. 悄悄拉取你 Fork 的仓库作为备用
+      - name: 📥 2. 悄悄拉取你 Fork 的魔改仓库备用
         uses: actions/checkout@v4
         with:
           path: my_fork_temp
           submodules: false
           
-      - name: 💉 3. 瞬间打补丁：鸠占鹊巢植入 M2 雷达代码
+      - name: 💉 3. 瞬间打补丁：植入 M2 雷达代码
         run: |
-          # 提取你改好的雷达文件，直接覆盖掉官方干净的源文件！
           cp my_fork_temp/Limelight/Stream/VideoDecoderRenderer.m Limelight/Stream/VideoDecoderRenderer.m
           echo "✅ M2 旁路雷达代码植入完成！"
           
-      - name: 📦 4. 下载 FFmpeg 核心视频依赖库
+      - name: 🔨 4. 启动物理真机无情编译
         run: |
-          chmod +x ./scripts/download-dependencies.sh
-          ./scripts/download-dependencies.sh
-          
-      - name: 🔨 5. 启动物理真机无情编译
-        run: |
+          # 纯净真机编译，拒绝一切花里胡哨
           xcodebuild build \
             -workspace Moonlight.xcworkspace \
             -scheme Moonlight \
@@ -41,13 +36,13 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
             
-      - name: 📦 6. 提取纯净 APP 并打包为巨魔 IPA
+      - name: 📦 5. 提取纯净 APP 并打包为巨魔 IPA
         run: |
           mkdir -p Payload
           cp -r build_output/Build/Products/Release-iphoneos/Moonlight.app Payload/
           zip -r Moonlight.ipa Payload
           
-      - name: 📤 7. 上传最终成品
+      - name: 📤 6. 上传最终成品
         uses: actions/upload-artifact@v4
         with:
           name: Moonlight-M2-Tracker
