@@ -31,6 +31,7 @@ static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
 
 // 🎯 iPad 纯坐标采集器：只锁最近目标，不做任何多余运算，防跳变交由PC处理
+// 🎯 iPad 纯坐标采集器：动态厚度卡尺 + 长宽比过滤版
 static void m2_process_frame(CVImageBufferRef pixelBuffer) {
     if (!pixelBuffer) return;
     
@@ -39,9 +40,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         fcntl(m2_udp_sock, F_SETFL, fcntl(m2_udp_sock, F_GETFL, 0) | O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
-        
-        // ⚠️⚠️⚠️ 极其重要：替换为你 PC 的热点 IP ⚠️⚠️⚠️
-        inet_pton(AF_INET, "192.168.137.1", &m2_pc_addr.sin_addr); 
+        inet_pton(AF_INET, "192.168.137.1", &m2_pc_addr.sin_addr); // ⚠️ 替换为你真实的 PC IP
     }
 
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
@@ -64,41 +63,83 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         int start_x = (int)(width * 0.1);
         int end_x = (int)(width * 0.9);
 
-        for (int y = start_y; y < end_y; y += 2) {
+        // 💡 必须逐行扫描 (y += 1)，确保绝不漏掉细小的血条上边缘
+        for (int y = start_y; y < end_y; y += 1) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
             
             for (int x = start_x; x < end_x; x += 2) {
-                // 过滤屏幕中心的准星
+                // 盲区保护：防止把屏幕正中心的准星当成血条
                 if (abs(x - cx) < 25 && abs(y - cy) < 25) continue;
 
-                if (yRow[x] > 240) { 
+                // 亮度 Y > 190 (稍微放宽容忍视频压缩)
+                if (yRow[x] > 190) { 
                     uint8_t u = uvRow[(x / 2) * 2];
                     uint8_t v = uvRow[(x / 2) * 2 + 1];
                     
-                    if (u > 115 && u < 140 && v > 115 && v < 140) {
-                        int is_line = 1;
-                        for (int k = 1; k < 4; k++) {
-                            if (x + k * 2 < end_x && yRow[x + k * 2] < 200) {
-                                is_line = 0; break;
+                    // 色彩过滤：低饱和度中性灰，完美包容你分析的微弱粉/蓝偏色
+                    if (abs(u - 128) < 30 && abs(v - 128) < 30) {
+                        
+                        // 📏 1. 横向卡尺 (测量连通宽度)
+                        int line_len = 0;
+                        int gap_tolerance = 0; 
+                        
+                        for (int k = 0; k < 150; k += 2) { 
+                            if (x + k >= end_x) break;
+                            if (yRow[x + k] > 150) {
+                                line_len += 2;
+                                gap_tolerance = 0; 
+                            } else {
+                                gap_tolerance += 2;
+                                if (gap_tolerance > 4) break; 
                             }
                         }
-                        if (is_line) {
-                            long dist = (x - cx)*(x - cx) + (y - cy)*(y - cy);
-                            // 💡 解决多血条干扰：只锁定离准星最近的那一条！
-                            if (dist < min_dist) {
-                                min_dist = dist;
-                                best_x = x;
-                                best_y = y;
+                        
+                        // 约束：残血血条最短 8px，满血最长约 150px
+                        if (line_len >= 8 && line_len <= 150) {
+                            
+                            // 🧱 2. 纵向卡尺 (动态测量高度 + 长宽比过滤)
+                            int is_thin = 1;
+                            int thickness = 1;
+                            int check_mid_x = x + line_len / 2; // 从血条横向正中心往下测，最准
+                            
+                            // 沿着血条中点，向下逐像素探测真实高度
+                            for (int t = 1; t <= 40; t++) {
+                                if (y + t >= end_y) break;
+                                if (yPlane[(y + t) * yBytesPerRow + check_mid_x] > 150) {
+                                    thickness++;
+                                } else {
+                                    break;
+                                }
                             }
-                            x += 30; // 找到后跳出干扰像素
+                            
+                            // 🎯 绝杀判定：
+                            // 1. 高度必须 <= 28px (完美包容你测量的 22px 数据 + 视频压缩毛边)
+                            // 2. 长宽比过滤：宽度必须大于厚度 (瞬间排除正方形UI和竖向白条)
+                            if (thickness > 28 || line_len <= thickness) {
+                                is_thin = 0;
+                            }
+                            
+                            if (is_thin) {
+                                long dist = (x - cx)*(x - cx) + (y - cy)*(y - cy);
+                                // 锁死离准星最近的那条血条！
+                                if (dist < min_dist) {
+                                    min_dist = dist;
+                                    best_x = x;
+                                    
+                                    // 💡 神级补偿：由于扫描碰到的是血条最顶端，我们直接加上 (厚度的一半)
+                                    // 这样发给电脑的坐标，永远是血条正中心完美的一点！彻底告别上下乱跳！
+                                    best_y = y + (thickness / 2); 
+                                }
+                                x += line_len; // 横向跳过该血条，防止同一行被重复测算
+                            }
                         }
                     }
                 }
             }
         }
         
-        // 极简数据包，彻底降低网络延迟
+        // 发送极简数据包
         if (best_x != -1) {
             float dx = best_x - cx;
             float dy = best_y - cy;
