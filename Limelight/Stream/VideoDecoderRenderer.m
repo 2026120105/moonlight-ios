@@ -29,16 +29,8 @@
 
 static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
-static float m2_prev_cx = -1, m2_prev_cy = -1;
-static double m2_prev_time = 0;
 
-static double m2_get_time_sec(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + (tv.tv_usec / 1000000.0);
-}
-
-// 🎯 并行解码回调：内存一解压出画面，立马执行扫描
+// 🎯 iPad 纯坐标采集器：只锁最近目标，不做任何多余运算
 static void m2_process_frame(CVImageBufferRef pixelBuffer) {
     if (!pixelBuffer) return;
     
@@ -47,7 +39,6 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         fcntl(m2_udp_sock, F_SETFL, fcntl(m2_udp_sock, F_GETFL, 0) | O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
-        // ⚠️⚠️⚠️ 极其重要：替换为你 PC 的热点 IP ⚠️⚠️⚠️
         inet_pton(AF_INET, "192.168.137.1", &m2_pc_addr.sin_addr); 
     }
 
@@ -64,19 +55,20 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         int cx = width / 2;
         int cy = height / 2;
         int best_x = -1, best_y = -1;
-        long min_dist = 2000000000;
+        
+        // 💡 核心：初始化一个极大值，用于记录“离准星最近的距离”
+        long min_dist = 2000000000; 
 
-        int start_y = (int)(height * 0.2);
-        int end_y = (int)(height * 0.8);
-        int start_x = (int)(width * 0.2);
-        int end_x = (int)(width * 0.8);
+        // 放大 iPad 端的视野范围，具体的 FOV 圆圈过滤交由电脑端画圈解决
+        int start_y = (int)(height * 0.1); int end_y = (int)(height * 0.9);
+        int start_x = (int)(width * 0.1);  int end_x = (int)(width * 0.9);
 
         for (int y = start_y; y < end_y; y += 2) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
             
             for (int x = start_x; x < end_x; x += 2) {
-                // 过滤屏幕中心的准星
+                // 屏蔽正中心自家准星的白色干扰
                 if (abs(x - cx) < 25 && abs(y - cy) < 25) continue;
 
                 if (yRow[x] > 240) { 
@@ -91,60 +83,34 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
                             }
                         }
                         if (is_line) {
+                            // 💡 解决多血条干扰：算出该血条端点到准星的距离平方
                             long dist = (x - cx)*(x - cx) + (y - cy)*(y - cy);
+                            
+                            // 只有距离比上一个更近的血条，才会覆盖记录！
                             if (dist < min_dist) {
                                 min_dist = dist;
                                 best_x = x;
                                 best_y = y;
                             }
-                            x += 30; // 找到后跳出干扰像素
+                            x += 30; // 找到后直接跳出，防止同一血条被重复计算
                         }
                     }
                 }
             }
         }
         
+        // 极简包体：只发送距离中心的最短偏移量，彻底减轻网络负担
         if (best_x != -1) {
-            float dx_left = best_x - cx;
-            float dy_left = best_y - cy;
-            double current_time = m2_get_time_sec();
-            float speed = 0, angle = 0;
-            
-            if (m2_prev_cx != -1) {
-                double dt = current_time - m2_prev_time;
-                if (dt > 0) {
-                    float vx = (best_x - m2_prev_cx) / dt; 
-                    float vy = (best_y - m2_prev_cy) / dt;
-                    speed = sqrt(vx*vx + vy*vy); 
-                    angle = atan2(vy, vx) * (180.0 / M_PI);
-                }
-            }
-            m2_prev_cx = best_x; m2_prev_cy = best_y; m2_prev_time = current_time;
-            
-            char msg[128];
-            snprintf(msg, sizeof(msg), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"spd\":%.1f,\"ang\":%.1f}", dx_left, dy_left, speed, angle);
+            float dx = best_x - cx; float dy = best_y - cy;
+            char msg[64];
+            snprintf(msg, sizeof(msg), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", dx, dy);
             sendto(m2_udp_sock, msg, strlen(msg), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
         } else {
-            m2_prev_cx = -1;
             char msg[] = "{\"f\":0}";
             sendto(m2_udp_sock, msg, strlen(msg), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
         }
     }
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-}
-
-static void m2_decompression_callback(
-    void * CM_NULLABLE decompressionOutputRefCon,
-    void * CM_NULLABLE sourceFrameRefCon,
-    OSStatus status,
-    VTDecodeInfoFlags infoFlags,
-    CM_NULLABLE CVImageBufferRef imageBuffer,
-    CMTime presentationTimeStamp,
-    CMTime presentationDuration )
-{
-    if (status == noErr && imageBuffer) {
-        m2_process_frame(imageBuffer);
-    }
 }
 // ==========================================
 
