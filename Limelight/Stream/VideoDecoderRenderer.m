@@ -32,6 +32,9 @@ static struct sockaddr_in m2_pc_addr;
 
 // 🎯 iPad 纯坐标采集器：只锁最近目标，不做任何多余运算，防跳变交由PC处理
 // 🎯 iPad 纯坐标采集器：动态厚度卡尺 + 长宽比过滤版
+// ==========================================================
+// 🚀 [外挂轨道] M2 战术实体轮廓追踪引擎 (Highlight Contour)
+// ==========================================================
 static void m2_process_frame(CVImageBufferRef pixelBuffer) {
     if (!pixelBuffer) return;
     
@@ -40,7 +43,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         fcntl(m2_udp_sock, F_SETFL, fcntl(m2_udp_sock, F_GETFL, 0) | O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
-        inet_pton(AF_INET, "192.168.137.1", &m2_pc_addr.sin_addr); // ⚠️ 替换为你真实的 PC IP
+        inet_pton(AF_INET, "192.168.137.1", &m2_pc_addr.sin_addr); // ⚠️ 修改为你的电脑IP
     }
 
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
@@ -55,85 +58,66 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         
         int cx = width / 2;
         int cy = height / 2;
+        
         int best_x = -1, best_y = -1;
         long min_dist = 2000000000;
 
-        int start_y = (int)(height * 0.1);
-        int end_y = (int)(height * 0.9);
-        int start_x = (int)(width * 0.1);
-        int end_x = (int)(width * 0.9);
+        int start_y = (int)(height * 0.1); int end_y = (int)(height * 0.9);
+        int start_x = (int)(width * 0.1);  int end_x = (int)(width * 0.9);
 
-        // 💡 必须逐行扫描 (y += 1)，确保绝不漏掉细小的血条上边缘
-        for (int y = start_y; y < end_y; y += 1) {
+        // 💡 步长改为 4，极速狂飙！因为假人的肉体极大，不需要逐个像素死磕
+        for (int y = start_y; y < end_y; y += 4) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
             
-            for (int x = start_x; x < end_x; x += 2) {
-                // 盲区保护：防止把屏幕正中心的准星当成血条
-                if (abs(x - cx) < 25 && abs(y - cy) < 25) continue;
+            for (int x = start_x; x < end_x; x += 4) {
+                // 屏蔽正中心准星的高光干扰
+                if (abs(x - cx) < 30 && abs(y - cy) < 30) continue;
 
-                // 亮度 Y > 190 (稍微放宽容忍视频压缩)
-                if (yRow[x] > 190) { 
+                uint8_t v = uvRow[(x / 2) * 2 + 1];
+                
+                // 🎯 核心色彩滤镜：强行剥离红/紫色高光！
+                // V > 165 (红色度极高) 瞬间过滤掉所有沙地、蓝天、白墙！
+                if (v > 165) { 
+                    uint8_t y_val = yRow[x];
                     uint8_t u = uvRow[(x / 2) * 2];
-                    uint8_t v = uvRow[(x / 2) * 2 + 1];
                     
-                    // 色彩过滤：低饱和度中性灰，完美包容你分析的微弱粉/蓝偏色
-                    if (abs(u - 128) < 30 && abs(v - 128) < 30) {
+                    // Y > 50 排除死黑阴影，U < 140 排除纯粹的蓝紫杂光
+                    if (y_val > 50 && u < 140) {
                         
-                        // 📏 1. 横向卡尺 (测量连通宽度)
-                        int line_len = 0;
-                        int gap_tolerance = 0; 
-                        
-                        for (int k = 0; k < 150; k += 2) { 
-                            if (x + k >= end_x) break;
-                            if (yRow[x + k] > 150) {
-                                line_len += 2;
-                                gap_tolerance = 0; 
+                        // 📏 垂直动态探针：顺着红点往下测，量出假人的真实身高！
+                        int body_h = 0;
+                        int gap = 0;
+                        for (int h = 0; h < 400; h += 2) { // 最大测量 400 像素高 (贴脸假人)
+                            if (y + h >= end_y) break;
+                            uint8_t probe_v = uvPlane[((y + h) / 2) * uvBytesPerRow + (x / 2) * 2 + 1];
+                            
+                            if (probe_v > 155) { // 如果下方依然是红点
+                                body_h = h; gap = 0;
                             } else {
-                                gap_tolerance += 2;
-                                if (gap_tolerance > 4) break; 
+                                gap += 2;
+                                // 允许 20 像素的断层（容忍假人双手持枪挡在胸前造成的视觉遮挡）
+                                if (gap > 20) break; 
                             }
                         }
                         
-                        // 约束：残血血条最短 8px，满血最长约 150px
-                        if (line_len >= 8 && line_len <= 150) {
+                        // 🧱 形态学验证：身高必须在 10px(图4极远) 到 400px(图1贴脸) 之间
+                        if (body_h >= 10 && body_h <= 400) {
                             
-                            // 🧱 2. 纵向卡尺 (动态测量高度 + 长宽比过滤)
-                            int is_thin = 1;
-                            int thickness = 1;
-                            int check_mid_x = x + line_len / 2; // 从血条横向正中心往下测，最准
+                            // 💀 神级解剖学定位：
+                            // 无论他多远多近，从头顶往下移动总身高的 25%，永远是胸口锁骨！
+                            int target_y = y + (body_h / 4);
                             
-                            // 沿着血条中点，向下逐像素探测真实高度
-                            for (int t = 1; t <= 40; t++) {
-                                if (y + t >= end_y) break;
-                                if (yPlane[(y + t) * yBytesPerRow + check_mid_x] > 150) {
-                                    thickness++;
-                                } else {
-                                    break;
-                                }
-                            }
-                            
-                            // 🎯 绝杀判定：
-                            // 1. 高度必须 <= 28px (完美包容你测量的 22px 数据 + 视频压缩毛边)
-                            // 2. 长宽比过滤：宽度必须大于厚度 (瞬间排除正方形UI和竖向白条)
-                            if (thickness > 28 || line_len <= thickness) {
-                                is_thin = 0;
-                            }
-                            
-                            if (is_thin) {
-                                long dist = (x - cx)*(x - cx) + (y - cy)*(y - cy);
-                                // 锁死离准星最近的那条血条！
-                                if (dist < min_dist) {
-                                    min_dist = dist;
-                                    best_x = x;
-                                    
-                                    // 💡 神级补偿：由于扫描碰到的是血条最顶端，我们直接加上 (厚度的一半)
-                                    // 这样发给电脑的坐标，永远是血条正中心完美的一点！彻底告别上下乱跳！
-                                    best_y = y + (thickness / 2); 
-                                }
-                                x += line_len; // 横向跳过该血条，防止同一行被重复测算
+                            // 只锁距离准星最近的假人！
+                            long dist = (x - cx)*(x - cx) + (target_y - cy)*(target_y - cy);
+                            if (dist < min_dist) {
+                                min_dist = dist;
+                                best_x = x;
+                                best_y = target_y;
                             }
                         }
+                        // 测完这个假人，横向直接跳过一段距离，大幅节约芯片算力
+                        x += 20; 
                     }
                 }
             }
@@ -141,9 +125,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         
         // 发送极简数据包
         if (best_x != -1) {
-            float dx = best_x - cx;
-            float dy = best_y - cy;
-            
+            float dx = best_x - cx; float dy = best_y - cy;
             char msg[64];
             snprintf(msg, sizeof(msg), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", dx, dy);
             sendto(m2_udp_sock, msg, strlen(msg), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
