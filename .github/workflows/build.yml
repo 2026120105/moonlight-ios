@@ -1,0 +1,34 @@
+name: Build TrollStore IPA
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          
+      - name: Build Moonlight Unsigned
+        run: |
+          # 免证书环境编译
+          xcodebuild archive \
+            -workspace Moonlight.xcworkspace \
+            -scheme Moonlight \
+            -configuration Release \
+            -archivePath build.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+          
+          # 手工打包为 TrollStore IPA
+          mkdir -p Payload
+          cp -r build.xcarchive/Products/Applications/Moonlight.app Payload/
+          zip -r Moonlight.ipa Payload
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Moonlight-M2-Tracker
+          path: Moonlight.ipa
