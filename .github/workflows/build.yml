@@ -10,24 +10,40 @@ jobs:
         with:
           submodules: recursive
           
-      - name: Build Moonlight Unsigned
+      - name: 🚀 Force Fetch Deep Submodules
         run: |
-          # 免证书环境编译
+          # 暴力解决套娃嵌套：强制同步并拉取最底层的 reedsolomon/rs.c 等所有深层依赖文件
+          git submodule sync --recursive
+          git submodule update --init --recursive --force
+          
+      - name: 📦 Download Required Dependencies
+        run: |
+          # 运行官方的依赖脚本，下载 FFmpeg 等核心解码库（极其重要，否则必报错）
+          chmod +x ./scripts/download-dependencies.sh
+          ./scripts/download-dependencies.sh
+          
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        
+      - name: 🔨 Build Moonlight Unsigned
+        run: |
+          # 强制指定为 iOS 平台，免证书编译
           xcodebuild archive \
             -workspace Moonlight.xcworkspace \
             -scheme Moonlight \
             -configuration Release \
+            -destination 'generic/platform=iOS' \
             -archivePath build.xcarchive \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
           
-          # 手工打包为 TrollStore IPA
+          # 手工提取并打包为巨魔专属的 TrollStore IPA
           mkdir -p Payload
           cp -r build.xcarchive/Products/Applications/Moonlight.app Payload/
           zip -r Moonlight.ipa Payload
           
-      - name: Upload Artifact
+      - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Moonlight-M2-Tracker
