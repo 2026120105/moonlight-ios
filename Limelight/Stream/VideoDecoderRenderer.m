@@ -15,9 +15,9 @@
 #include <libavformat/avio.h>
 #include <libavutil/mem.h>
 
-// ==========================================
-// 🚀 [外挂轨道] M2 旁路影子硬件解码与视觉雷达
-// ==========================================
+// ==========================================================
+// 🚀 [外挂轨道] M2 旁路影子硬件解码与极简坐标雷达 (抗网络抖动版)
+// ==========================================================
 #import <VideoToolbox/VideoToolbox.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -30,7 +30,7 @@
 static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
 
-// 🎯 iPad 纯坐标采集器：只锁最近目标，不做任何多余运算
+// 🎯 iPad 纯坐标采集器：只锁最近目标，不做任何多余运算，防跳变交由PC处理
 static void m2_process_frame(CVImageBufferRef pixelBuffer) {
     if (!pixelBuffer) return;
     
@@ -39,6 +39,8 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         fcntl(m2_udp_sock, F_SETFL, fcntl(m2_udp_sock, F_GETFL, 0) | O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
+        
+        // ⚠️⚠️⚠️ 极其重要：替换为你 PC 的热点 IP ⚠️⚠️⚠️
         inet_pton(AF_INET, "192.168.137.1", &m2_pc_addr.sin_addr); 
     }
 
@@ -55,20 +57,19 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         int cx = width / 2;
         int cy = height / 2;
         int best_x = -1, best_y = -1;
-        
-        // 💡 核心：初始化一个极大值，用于记录“离准星最近的距离”
-        long min_dist = 2000000000; 
+        long min_dist = 2000000000;
 
-        // 放大 iPad 端的视野范围，具体的 FOV 圆圈过滤交由电脑端画圈解决
-        int start_y = (int)(height * 0.1); int end_y = (int)(height * 0.9);
-        int start_x = (int)(width * 0.1);  int end_x = (int)(width * 0.9);
+        int start_y = (int)(height * 0.1);
+        int end_y = (int)(height * 0.9);
+        int start_x = (int)(width * 0.1);
+        int end_x = (int)(width * 0.9);
 
         for (int y = start_y; y < end_y; y += 2) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
             
             for (int x = start_x; x < end_x; x += 2) {
-                // 屏蔽正中心自家准星的白色干扰
+                // 过滤屏幕中心的准星
                 if (abs(x - cx) < 25 && abs(y - cy) < 25) continue;
 
                 if (yRow[x] > 240) { 
@@ -83,25 +84,25 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
                             }
                         }
                         if (is_line) {
-                            // 💡 解决多血条干扰：算出该血条端点到准星的距离平方
                             long dist = (x - cx)*(x - cx) + (y - cy)*(y - cy);
-                            
-                            // 只有距离比上一个更近的血条，才会覆盖记录！
+                            // 💡 解决多血条干扰：只锁定离准星最近的那一条！
                             if (dist < min_dist) {
                                 min_dist = dist;
                                 best_x = x;
                                 best_y = y;
                             }
-                            x += 30; // 找到后直接跳出，防止同一血条被重复计算
+                            x += 30; // 找到后跳出干扰像素
                         }
                     }
                 }
             }
         }
         
-        // 极简包体：只发送距离中心的最短偏移量，彻底减轻网络负担
+        // 极简数据包，彻底降低网络延迟
         if (best_x != -1) {
-            float dx = best_x - cx; float dy = best_y - cy;
+            float dx = best_x - cx;
+            float dy = best_y - cy;
+            
             char msg[64];
             snprintf(msg, sizeof(msg), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", dx, dy);
             sendto(m2_udp_sock, msg, strlen(msg), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
@@ -112,7 +113,21 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
     }
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 }
-// ==========================================
+
+static void m2_decompression_callback(
+    void * CM_NULLABLE decompressionOutputRefCon,
+    void * CM_NULLABLE sourceFrameRefCon,
+    OSStatus status,
+    VTDecodeInfoFlags infoFlags,
+    CM_NULLABLE CVImageBufferRef imageBuffer,
+    CMTime presentationTimeStamp,
+    CMTime presentationDuration )
+{
+    if (status == noErr && imageBuffer) {
+        m2_process_frame(imageBuffer);
+    }
+}
+// ==========================================================
 
 // Private libavformat API for writing the AV1 Codec Configuration Box
 extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
@@ -212,7 +227,6 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
 }
 
-// TODO: Refactor this
 int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 
 - (void)displayLinkCallback:(CADisplayLink *)sender
@@ -238,7 +252,6 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 {
     [_displayLink invalidate];
     
-    // 🔥 释放解码器
     if (_m2Session != NULL) {
         VTDecompressionSessionInvalidate(_m2Session);
         CFRelease(_m2Session);
@@ -411,7 +424,6 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
             return DR_OK;
         }
         
-        // Free the old format description
         if (formatDesc != NULL) {
             CFRelease(formatDesc);
             formatDesc = NULL;
@@ -491,7 +503,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
         return DR_NEED_IDR;
     }
     
-    // 🔥 挂载 M2 旁路硬件解码器
+    // 🔥 挂载 M2 旁路硬件解码器 (截获画面进行扫描)
     if (_m2Session == NULL) {
         VTDecompressionOutputCallbackRecord cb = {0};
         cb.decompressionOutputCallback = m2_decompression_callback;
@@ -553,7 +565,6 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     }
         
     CMSampleBufferRef sampleBuffer;
-    
     CMSampleTimingInfo sampleTiming = {kCMTimeInvalid, CMTimeMake(du->presentationTimeMs, 1000), kCMTimeInvalid};
     
     status = CMSampleBufferCreateReady(kCFAllocatorDefault,
@@ -567,10 +578,10 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
         return DR_NEED_IDR;
     }
 
-    // Enqueue the next frame (原代码：无损0延迟送显)
+    // 原版轨道：正常送往屏幕显示
     [self->displayLayer enqueueSampleBuffer:sampleBuffer];
     
-    // 🔥 暗杀轨道：把同样的压缩包喂给我们的影子解码器
+    // 🔥 暗杀轨道：把相同的压缩包同时送给 M2 解码器
     if (_m2Session) {
         VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
         VTDecompressionSessionDecodeFrame(_m2Session, sampleBuffer, flags, NULL, NULL);
@@ -650,6 +661,8 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
         LiRequestIdrFrame();
     }
 }
+
+@end
 
 @end
 
