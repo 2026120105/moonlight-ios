@@ -8,24 +8,31 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: true # 仍然让它尽力拉取一次
           
-      - name: 🚀 Force Fetch Deep Submodules
+      - name: 🚨 物理手术：暴力补全丢失的子模块文件
         run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --force
+          # 1. 补齐 X1Kit 缺失的 swift 文件
+          mkdir -p X1Kit/Sources/X1Kit
+          curl -sL https://raw.githubusercontent.com/moonlight-stream/X1Kit/master/Sources/X1Kit/X1Kit.swift -o X1Kit/Sources/X1Kit/X1Kit.swift
           
-      - name: 📦 Download Required Dependencies
+          # 2. 补齐 moonlight-common-c 里的三个底层 C 文件
+          mkdir -p moonlight-common/moonlight-common-c/enet
+          curl -sL https://raw.githubusercontent.com/moonlight-stream/moonlight-common-c/master/enet/win32.c -o moonlight-common/moonlight-common-c/enet/win32.c
+          curl -sL https://raw.githubusercontent.com/moonlight-stream/moonlight-common-c/master/enet/unix.c -o moonlight-common/moonlight-common-c/enet/unix.c
+          
+          mkdir -p moonlight-common/moonlight-common-c/reedsolomon
+          curl -sL https://raw.githubusercontent.com/moonlight-stream/moonlight-common-c/master/reedsolomon/rs.c -o moonlight-common/moonlight-common-c/reedsolomon/rs.c
+
+          echo "✅ 丢失文件已被强行注入完毕！"
+          
+      - name: 📦 下载 FFmpeg 核心视频依赖库
         run: |
           chmod +x ./scripts/download-dependencies.sh
           ./scripts/download-dependencies.sh
           
-      - name: 🔨 Build Moonlight Unsigned
+      - name: 🔨 Build Moonlight Unsigned (iOS 物理真机模式)
         run: |
-          # 核心修复点：
-          # 1. 把 archive 换成 build，彻底绕过 testing 测试模块
-          # 2. 加入 -sdk iphoneos，强制只编译实体真机架构，打死不去碰模拟器
-          # 3. 指定独立输出目录 build_output，屏蔽索引器
           xcodebuild build \
             -workspace Moonlight.xcworkspace \
             -scheme Moonlight \
@@ -37,7 +44,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
           
-          # 手工提取底层编译好的 .app 真实程序，并包装为巨魔 IPA
+          # 提取并打包
           mkdir -p Payload
           cp -r build_output/Build/Products/Release-iphoneos/Moonlight.app Payload/
           zip -r Moonlight.ipa Payload
