@@ -24,9 +24,9 @@ jobs:
           
       - name: 🔨 4. 启动物理真机无情编译
         run: |
-          # 纯净真机编译，拒绝一切花里胡哨
+          # 🚨 终极修复：使用原生的 -project 替代 -workspace！
           xcodebuild build \
-            -workspace Moonlight.xcworkspace \
+            -project Moonlight.xcodeproj \
             -scheme Moonlight \
             -configuration Release \
             -sdk iphoneos \
