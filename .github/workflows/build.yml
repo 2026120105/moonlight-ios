@@ -3,7 +3,7 @@ on: [workflow_dispatch]
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -12,35 +12,34 @@ jobs:
           
       - name: 🚀 Force Fetch Deep Submodules
         run: |
-          # 暴力解决套娃嵌套：强制同步并拉取最底层的 reedsolomon/rs.c 等所有深层依赖文件
           git submodule sync --recursive
           git submodule update --init --recursive --force
           
       - name: 📦 Download Required Dependencies
         run: |
-          # 运行官方的依赖脚本，下载 FFmpeg 等核心解码库（极其重要，否则必报错）
           chmod +x ./scripts/download-dependencies.sh
           ./scripts/download-dependencies.sh
           
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-        
       - name: 🔨 Build Moonlight Unsigned
         run: |
-          # 强制指定为 iOS 平台，免证书编译
-          xcodebuild archive \
+          # 核心修复点：
+          # 1. 把 archive 换成 build，彻底绕过 testing 测试模块
+          # 2. 加入 -sdk iphoneos，强制只编译实体真机架构，打死不去碰模拟器
+          # 3. 指定独立输出目录 build_output，屏蔽索引器
+          xcodebuild build \
             -workspace Moonlight.xcworkspace \
             -scheme Moonlight \
             -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath build.xcarchive \
+            -sdk iphoneos \
+            -derivedDataPath build_output \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
           
-          # 手工提取并打包为巨魔专属的 TrollStore IPA
+          # 手工提取底层编译好的 .app 真实程序，并包装为巨魔 IPA
           mkdir -p Payload
-          cp -r build.xcarchive/Products/Applications/Moonlight.app Payload/
+          cp -r build_output/Build/Products/Release-iphoneos/Moonlight.app Payload/
           zip -r Moonlight.ipa Payload
           
       - name: 📤 Upload Artifact
