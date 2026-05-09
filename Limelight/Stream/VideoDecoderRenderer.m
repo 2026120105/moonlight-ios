@@ -65,59 +65,55 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         int start_y = (int)(height * 0.1); int end_y = (int)(height * 0.9);
         int start_x = (int)(width * 0.1);  int end_x = (int)(width * 0.9);
 
-        // 💡 步长改为 4，极速狂飙！因为假人的肉体极大，不需要逐个像素死磕
-        for (int y = start_y; y < end_y; y += 4) {
+        // 💡 步长 2，极速穿插网格条纹
+        for (int y = start_y; y < end_y; y += 2) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
             
-            for (int x = start_x; x < end_x; x += 4) {
-                // 屏蔽正中心准星的高光干扰
+            for (int x = start_x; x < end_x; x += 2) {
+                // 屏蔽正中心自家准星红点干扰
                 if (abs(x - cx) < 30 && abs(y - cy) < 30) continue;
 
                 uint8_t v = uvRow[(x / 2) * 2 + 1];
                 
-                // 🎯 核心色彩滤镜：强行剥离红/紫色高光！
-                // V > 165 (红色度极高) 瞬间过滤掉所有沙地、蓝天、白墙！
-                if (v > 165) { 
+                // 🎯 1. 基因级色彩阈值：V > 150 
+                // 你的样本最低是 167，我们留一点容错率应对距离衰减，瞬间秒杀环境杂色！
+                if (v > 150) { 
                     uint8_t y_val = yRow[x];
                     uint8_t u = uvRow[(x / 2) * 2];
                     
-                    // Y > 50 排除死黑阴影，U < 140 排除纯粹的蓝紫杂光
-                    if (y_val > 50 && u < 140) {
+                    // 🎯 2. 基因级明暗阈值：Y > 35 (包容你测出的 56 阴影极暗值，防死黑)
+                    // 🎯 3. 基因级蓝光排斥：U < 115 (包容你测出的 108，排斥一切非暖色光斑)
+                    if (y_val > 35 && u < 115) {
                         
-                        // 📏 垂直动态探针：顺着红点往下测，量出假人的真实身高！
+                        // 📏 30 像素防断层大拉链：无视条纹缝隙，顺着身子往下量总高度
                         int body_h = 0;
                         int gap = 0;
-                        for (int h = 0; h < 400; h += 2) { // 最大测量 400 像素高 (贴脸假人)
+                        for (int h = 0; h < 400; h += 2) { 
                             if (y + h >= end_y) break;
                             uint8_t probe_v = uvPlane[((y + h) / 2) * uvBytesPerRow + (x / 2) * 2 + 1];
                             
-                            if (probe_v > 155) { // 如果下方依然是红点
-                                body_h = h; gap = 0;
+                            // 由于向下探索时条纹可能更稀疏，我们将连通标准稍微降到 140
+                            if (probe_v > 140) { 
+                                body_h = h; gap = 0; 
                             } else {
                                 gap += 2;
-                                // 允许 20 像素的断层（容忍假人双手持枪挡在胸前造成的视觉遮挡）
-                                if (gap > 20) break; 
+                                if (gap > 30) break; // 允许横向手臂遮挡等造成的 30 像素物理断裂！
                             }
                         }
                         
-                        // 🧱 形态学验证：身高必须在 10px(图4极远) 到 400px(图1贴脸) 之间
-                        if (body_h >= 10 && body_h <= 400) {
+                        // 🧱 约束身高，并执行 3D 黄金比例等比锁胸算法
+                        if (body_h >= 12 && body_h <= 400) {
+                            int target_y = y + (body_h / 4); // 锁定假人从上往下 25% 处（胸口/锁骨）
                             
-                            // 💀 神级解剖学定位：
-                            // 无论他多远多近，从头顶往下移动总身高的 25%，永远是胸口锁骨！
-                            int target_y = y + (body_h / 4);
-                            
-                            // 只锁距离准星最近的假人！
                             long dist = (x - cx)*(x - cx) + (target_y - cy)*(target_y - cy);
                             if (dist < min_dist) {
                                 min_dist = dist;
                                 best_x = x;
-                                best_y = target_y;
+                                best_y = target_y; 
                             }
                         }
-                        // 测完这个假人，横向直接跳过一段距离，大幅节约芯片算力
-                        x += 20; 
+                        x += 20; // 找到后跳过横向距离，防同一个身体重复算高度
                     }
                 }
             }
