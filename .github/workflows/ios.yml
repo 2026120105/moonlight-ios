@@ -5,40 +5,72 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch: # 保留手动触发按钮
 
 jobs:
   build:
-    name: Build and Test default scheme using any available iPhone simulator
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
-      - name: Checkout
+      - name: 📥 1. 拉取满血源码
         uses: actions/checkout@v4
-      - name: Set Default Scheme
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: 🐍 2. 部署 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 🧠 3. AI 大脑转化与工程注入
         run: |
-          scheme_list=$(xcodebuild -list -json | tr -d "\n")
-          default=$(echo $scheme_list | ruby -e "require 'json'; puts JSON.parse(STDIN.gets)['project']['targets'][0]")
-          echo $default | cat >default
-          echo Using default scheme: $default
-      - name: Build
-        env:
-          scheme: ${{ 'default' }}
-          platform: ${{ 'iOS Simulator' }}
+          pip install ultralytics coremltools
+          # 确保 best.pt 就在仓库根目录
+          if [ -f "best.pt" ]; then
+            python -c "from ultralytics import YOLO; model = YOLO('best.pt'); model.export(format='coreml', nms=True, imgsz=416)"
+            xcrun coremlcompiler compile best.mlpackage .
+            
+            gem install xcodeproj
+            ruby -e "
+            require 'xcodeproj'
+            project = Xcodeproj::Project.open('Moonlight.xcodeproj')
+            target = project.targets.find { |t| t.name == 'Moonlight' }
+            file = project.main_group.new_reference('best.mlmodelc')
+            target.resources_build_phase.add_file_reference(file)
+            target.build_configurations.each do |config|
+              config.build_settings['COREML_CODEGEN_LANGUAGE'] = 'None'
+            end
+            project.save
+            "
+            echo "✅ AI 引擎注入成功"
+          else
+            echo "❌ 错误：未在根目录找到 best.pt，请先上传文件！"
+            exit 1
+          fi
+
+      - name: 🔨 4. 真机环境无情编译 (跳过无用的模拟器测试)
         run: |
-          # xcrun xctrace returns via stderr, not the expected stdout (see https://developer.apple.com/forums/thread/663959)
-          device=`xcrun xctrace list devices 2>&1 | grep -oE 'iPhone.*?[^\(]+' | head -1 | awk '{$1=$1;print}' | sed -e "s/ Simulator$//"`
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild build-for-testing -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -destination "platform=$platform,name=$device"
-      - name: Test
-        env:
-          scheme: ${{ 'default' }}
-          platform: ${{ 'iOS Simulator' }}
+          xcodebuild build \
+            -project Moonlight.xcodeproj \
+            -scheme Moonlight \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build_output \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: 📦 5. 打包为 TrollStore IPA
         run: |
-          # xcrun xctrace returns via stderr, not the expected stdout (see https://developer.apple.com/forums/thread/663959)
-          device=`xcrun xctrace list devices 2>&1 | grep -oE 'iPhone.*?[^\(]+' | head -1 | awk '{$1=$1;print}' | sed -e "s/ Simulator$//"`
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild test-without-building -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -destination "platform=$platform,name=$device"
+          mkdir -p Payload
+          cp -r build_output/Build/Products/Release-iphoneos/Moonlight.app Payload/
+          zip -r Moonlight_M2_AI.ipa Payload
+
+      - name: 📤 6. 发布成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: Moonlight-M2-AI-Build
+          path: Moonlight_M2_AI.ipa
