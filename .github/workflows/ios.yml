@@ -12,7 +12,7 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: 📥 1. 拉取满血源码
+      - name: 📥 1. 拉取满血源码 (含子模块)
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -23,33 +23,43 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 🧠 3. AI 大脑转化与工程注入
+      - name: 🧠 3. AI 大脑转化与物理注入
         run: |
           pip install ultralytics coremltools
-          # 确保 best.pt 就在仓库根目录
+          # 验证 best.pt 是否存在
           if [ -f "best.pt" ]; then
+            echo "🎯 发现 best.pt，开始炼化苹果原生灵魂..."
+            # 转化 CoreML (包含 NMS 算法)
             python -c "from ultralytics import YOLO; model = YOLO('best.pt'); model.export(format='coreml', nms=True, imgsz=416)"
+            # 编译为 M2 ANE 专用的二进制文件夹
             xcrun coremlcompiler compile best.mlpackage .
             
+            # 使用 Ruby 脚本进行 Xcode 工程的“开颅手术”
             gem install xcodeproj
             ruby -e "
             require 'xcodeproj'
             project = Xcodeproj::Project.open('Moonlight.xcodeproj')
+            # 精准定位主 Target
             target = project.targets.find { |t| t.name == 'Moonlight' }
+            
+            # 将编译好的 best.mlmodelc 文件夹注册进工程资源
             file = project.main_group.new_reference('best.mlmodelc')
             target.resources_build_phase.add_file_reference(file)
+            
+            # 🚨 极其关键：禁止生成 Swift 类，防止 Objective-C 工程产生链接冲突（解决 Exit Code 65）
             target.build_configurations.each do |config|
               config.build_settings['COREML_CODEGEN_LANGUAGE'] = 'None'
             end
+            
             project.save
             "
-            echo "✅ AI 引擎注入成功"
+            echo "✅ AI 核心注入完成！"
           else
-            echo "❌ 错误：未在根目录找到 best.pt，请先上传文件！"
+            echo "❌ 严重错误：未在仓库根目录找到 best.pt！"
             exit 1
           fi
 
-      - name: 🔨 4. 真机环境无情编译 (跳过无用的模拟器测试)
+      - name: 🔨 4. 真机环境无情编译 (彻底封杀模拟器冲突)
         run: |
           xcodebuild build \
             -project Moonlight.xcodeproj \
@@ -58,6 +68,8 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build_output \
+            -quiet \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -66,10 +78,12 @@ jobs:
       - name: 📦 5. 打包为 TrollStore IPA
         run: |
           mkdir -p Payload
+          # 提取编译好的 App
           cp -r build_output/Build/Products/Release-iphoneos/Moonlight.app Payload/
+          # 封装成 IPA
           zip -r Moonlight_M2_AI.ipa Payload
 
-      - name: 📤 6. 发布成品
+      - name: 📤 6. 发布最终成品
         uses: actions/upload-artifact@v4
         with:
           name: Moonlight-M2-AI-Build
