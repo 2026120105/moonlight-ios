@@ -14,7 +14,7 @@
 #include <fcntl.h>
 
 // ==========================================================
-// 🚀 [M2 ANE] 旁路 AI 插件 - 绝不干扰主流程
+// 🧠 [M2 ANE] 异步旁路 AI 引擎 (100% 官方兼容版)
 // ==========================================================
 static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
@@ -22,27 +22,31 @@ static VNCoreMLModel *m2_ai_model = nil;
 static VNCoreMLRequest *m2_ai_request = nil;
 static dispatch_queue_t m2_queue = nil;
 
+// AI 插件静默启动
 static void m2_init_plugin(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        m2_queue = dispatch_queue_create("com.m2.ai", DISPATCH_QUEUE_SERIAL);
+        m2_queue = dispatch_queue_create("com.m2.ai_logic", DISPATCH_QUEUE_SERIAL);
         m2_udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
         fcntl(m2_udp_sock, F_SETFL, O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
-        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); // ⚠️ 确保 IP 正确
+        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); // ⚠️ 确认你的 PC IP
 
-        NSURL *url = [[NSBundle mainBundle] URLForResource:@"best" withExtension:@"mlmodelc"];
-        if (url) {
-            MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
-            config.computeUnits = MLComputeUnitsAll;
-            MLModel *ml = [MLModel modelWithContentsOfURL:url configuration:config error:nil];
-            if (ml) {
-                m2_ai_model = [VNCoreMLModel modelForMLModel:ml error:nil];
-                m2_ai_request = [[VNCoreMLRequest alloc] initWithModel:m2_ai_model];
-                m2_ai_request.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSURL *url = [[NSBundle mainBundle] URLForResource:@"best" withExtension:@"mlmodelc"];
+            if (url) {
+                MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
+                config.computeUnits = MLComputeUnitsAll; // 激活 M2 ANE
+                MLModel *ml = [MLModel modelWithContentsOfURL:url configuration:config error:nil];
+                if (ml) {
+                    m2_ai_model = [VNCoreMLModel modelForMLModel:ml error:nil];
+                    m2_ai_request = [[VNCoreMLRequest alloc] initWithModel:m2_ai_model];
+                    m2_ai_request.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
+                    printf("✅ [M2 AI] ANE 引擎后台就绪！\n");
+                }
             }
-        }
+        });
     });
 }
 
@@ -58,6 +62,7 @@ static void m2_run_ai(CVImageBufferRef pix) {
                 for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
                     if (o.confidence > 0.45f) {
                         CGRect b = o.boundingBox;
+                        // 坐标计算：包含 20% 的高度修正
                         int tx = (b.origin.x + b.size.width/2.0)*w, ty = (1.0-b.origin.y-b.size.height*0.8)*h_px;
                         float d = pow(tx-w/2, 2) + pow(ty-h_px/2, 2);
                         if (d < min_d) { min_d = d; best_x = tx; best_y = ty; }
@@ -76,16 +81,12 @@ static void m2_run_ai(CVImageBufferRef pix) {
 }
 
 // ==========================================================
-// 🏗️ Moonlight 官方核心逻辑 (严禁大幅修改)
+// 🏗️ Moonlight 官方兼容层
 // ==========================================================
-
 extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int write_seq_header);
 
 static void m2_decompression_callback(void *refCon, void *sfRefCon, OSStatus status, VTDecodeInfoFlags info, CVImageBufferRef img, CMTime pts, CMTime dur) {
     if (status == noErr && img) {
-        // 渲染是第一优先级
-        VideoDecoderRenderer *renderer = (__bridge VideoDecoderRenderer *)refCon;
-        // 注入 AI 旁路
         m2_init_plugin();
         m2_run_ai(img);
     }
@@ -154,7 +155,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
 
 - (int)submitDecodeBuffer:(unsigned char *)data length:(int)length bufferType:(int)bt decodeUnit:(PDECODE_UNIT)du {
     if (du->frameType == FRAME_TYPE_IDR) {
-        if (bt != 4) { // Header data
+        if (bt != 4) {
             if (bt >= 1 && bt <= 3) [parameterSetBuffers addObject:[NSData dataWithBytes:&data[data[2]==0x01?3:4] length:length-(data[2]==0x01?3:4)]];
             return 0;
         }
@@ -177,7 +178,6 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
     CMBlockBufferCreateWithMemoryBlock(NULL, data, length, kCFAllocatorDefault, NULL, 0, length, 0, &dbb);
     CMBlockBufferCreateEmpty(NULL, 0, 0, &fbb);
     
-    // NALU Conversion
     int last = -1;
     for (int i=0; i<length-3; i++) {
         if (data[i]==0 && data[i+1]==0 && data[i+2]==1) {
@@ -205,9 +205,9 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
     CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(du->presentationTimeMs, 1000), kCMTimeInvalid};
     CMSampleBufferCreateReady(NULL, fbb, formatDesc, 1, 1, &ti, 0, NULL, &sb);
     
-    // 🚀 核心：直接将解码包发往显示层，不经过中间环节
+    // 🚀 核心修复：直接投递显示，绝不等待任何回调
     [displayLayer enqueueSampleBuffer:sb];
-    // 同时发往解码会话（触发 m2_decompression_callback 后台 AI 逻辑）
+    // 后台并行触发 AI 解码
     VTDecompressionSessionDecodeFrame(_session, sb, 0, NULL, NULL);
     
     if (du->frameType == FRAME_TYPE_IDR) { displayLayer.hidden = NO; [_callbacks videoContentShown]; }
