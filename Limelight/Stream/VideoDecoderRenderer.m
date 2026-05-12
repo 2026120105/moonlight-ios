@@ -14,7 +14,7 @@
 #include <fcntl.h>
 
 // ==========================================================
-// 📡 [M2 ANE] 极简装甲版雷达与 AI
+// 📡 [M2 ANE] 远程遥测 & 异步安全旁路
 // ==========================================================
 static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
@@ -60,7 +60,7 @@ static void m2_init_plugin(void) {
                 m2_ai_model = [VNCoreMLModel modelForMLModel:ml error:nil];
                 m2_ai_request = [[VNCoreMLRequest alloc] initWithModel:m2_ai_model];
                 m2_ai_request.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
-                M2_LOG("[AI] ✅ 引擎点火成功！");
+                M2_LOG("[AI] ✅ 神经引擎点火成功！");
             } else {
                 M2_LOG("[AI] ❌ 模型装载失败");
             }
@@ -104,7 +104,7 @@ static void m2_decomp_callback(void *refCon, void *sfRefCon, OSStatus status, VT
 }
 
 // ==========================================================
-// 🏗️ Moonlight 安全渲染核心
+// 🏗️ Moonlight 像素级安全渲染核心
 // ==========================================================
 extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int write_seq_header);
 
@@ -143,9 +143,9 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     _view = view; _callbacks = callbacks; _streamAspectRatio = aspectRatio; framePacing = useFramePacing;
     parameterSetBuffers = [NSMutableArray new];
     debug_frame_count = 0;
-    M2_LOG("[System] 渲染器初始化启动...");
     m2_init_plugin();
     [self reinitializeDisplayLayer];
+    M2_LOG("[System] 渲染器初始化完毕");
     return self;
 }
 
@@ -172,36 +172,54 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
     if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
 }
 
-// 安全内存替换函数
-- (void)updateAnnexBBufferForRange:(CMBlockBufferRef)frameBuffer dataBlock:(CMBlockBufferRef)dataBuffer offset:(int)offset length:(int)nalLength {
-    if (nalLength < 4) return; // 🛡️ 防止越界：包长度过小直接丢弃
+// 🛡️ 智能包头探测与转换
+- (void)updateAnnexBBufferForRange:(CMBlockBufferRef)frameBuffer dataBlock:(CMBlockBufferRef)dataBlock offset:(int)offset length:(int)nalLength data:(unsigned char *)data {
+    if (nalLength < 4) return;
+    
+    int startCodeLen = 3;
+    if (nalLength >= 4 && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 0 && data[offset+3] == 1) {
+        startCodeLen = 4;
+    } else if (nalLength >= 3 && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 1) {
+        startCodeLen = 3;
+    } else {
+        return; // 无效包头
+    }
+    
     OSStatus status;
     size_t oldOffset = CMBlockBufferGetDataLength(frameBuffer);
     status = CMBlockBufferAppendMemoryBlock(frameBuffer, NULL, 4, kCFAllocatorDefault, NULL, 0, 4, 0);
     if (status != noErr) return;
-    const int dataLength = nalLength - 3;
+    
+    const int dataLength = nalLength - startCodeLen;
     const uint8_t lengthBytes[] = {(uint8_t)(dataLength >> 24), (uint8_t)(dataLength >> 16), (uint8_t)(dataLength >> 8), (uint8_t)dataLength};
     status = CMBlockBufferReplaceDataBytes(lengthBytes, frameBuffer, oldOffset, 4);
     if (status != noErr) return;
-    CMBlockBufferAppendBufferReference(frameBuffer, dataBuffer, offset + 3, dataLength, 0);
+    
+    CMBlockBufferAppendBufferReference(frameBuffer, dataBlock, offset + startCodeLen, dataLength, 0);
 }
 
 - (int)submitDecodeBuffer:(unsigned char *)data length:(int)length bufferType:(int)bt decodeUnit:(PDECODE_UNIT)du {
-    if (debug_frame_count < 5) { M2_LOG("[Decode] 收到包长: %d", length); debug_frame_count++; }
+    if (debug_frame_count < 5) { M2_LOG("[Decode] 收到包长: %d (类型: %d)", length, du->frameType); debug_frame_count++; }
 
     if (du->frameType == FRAME_TYPE_IDR) {
         if (bt != 4) {
-            if (bt >= 1 && bt <= 3 && length >= 4) {
-                int startLen = data[2] == 0x01 ? 3 : 4;
+            if (bt >= 1 && bt <= 3) {
+                int startLen = 3;
+                if (length >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) startLen = 4;
                 [parameterSetBuffers addObject:[NSData dataWithBytes:&data[startLen] length:length - startLen]];
             }
-            return 0;
+            return 0; // 头文件成功接收，返回 0
         }
+        
+        M2_LOG("[Decode] 📦 开始处理 IDR 图像帧");
         if (formatDesc != NULL) { CFRelease(formatDesc); formatDesc = NULL; }
         if (_session != NULL) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
         
         size_t pc = [parameterSetBuffers count];
-        if (pc == 0) { M2_LOG("[Decode] ❌ 缺失 SPS/PPS 头数据！"); free(data); return 1; }
+        if (pc == 0) { 
+            M2_LOG("[Decode] ❌ 缺失 SPS/PPS！请求重传..."); 
+            free(data); return 1; // 🚨 请求电脑重新发一帧！
+        }
         
         const uint8_t* pps[pc]; size_t pss[pc];
         for (int i = 0; i < pc; i++) { NSData* p = parameterSetBuffers[i]; pps[i] = p.bytes; pss[i] = p.length; }
@@ -216,35 +234,41 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
         if (formatDesc) {
             VTDecompressionOutputCallbackRecord cb = {m2_decomp_callback, (__bridge void *)self};
             NSDictionary *attr = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)};
-            OSStatus status = VTDecompressionSessionCreate(NULL, formatDesc, NULL, (__bridge CFDictionaryRef)attr, &cb, &_session);
-            if (status == noErr) M2_LOG("[Decode] ✅ 硬件解码会话建立！");
-            else M2_LOG("[Decode] ❌ 会话建立失败: %d", (int)status);
+            OSStatus st = VTDecompressionSessionCreate(NULL, formatDesc, NULL, (__bridge CFDictionaryRef)attr, &cb, &_session);
+            if (st != noErr) {
+                M2_LOG("[Decode] ❌ 会话建立失败: %d", (int)st);
+                free(data); return 1; // 🚨 建立失败，请求重传！
+            }
+        } else {
+            M2_LOG("[Decode] ❌ formatDesc 描述文件生成失败！");
+            free(data); return 1;
         }
     }
     
-    if (!formatDesc) { free(data); return 1; }
+    if (!formatDesc || !_session) { free(data); return 1; }
     
     CMBlockBufferRef fbb, dbb;
     CMBlockBufferCreateWithMemoryBlock(NULL, data, length, kCFAllocatorDefault, NULL, 0, length, 0, &dbb);
     CMBlockBufferCreateEmpty(NULL, 0, 0, &fbb);
     
-    // 🛡️ 装甲级 NALU 解析器，兼容 3 字节和 4 字节前缀
+    // 🛡️ 精确的字节扫描逻辑
     int last = -1;
-    for (int i = 0; i < length - 3; i++) {
+    for (int i = 0; i < length - 2; i++) {
         if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
             int start_idx = i;
-            if (i > 0 && data[i-1] == 0) start_idx = i - 1; // 捕获 4 字节的 00 00 00 01
+            if (i > 0 && data[i-1] == 0) start_idx = i - 1; // 兼容 4 字节前缀
             
             if (last != -1) {
-                int nal_len = start_idx - last;
-                if (nal_len >= 4) [self updateAnnexBBufferForRange:fbb dataBlock:dbb offset:last length:nal_len];
+                [self updateAnnexBBufferForRange:fbb dataBlock:dbb offset:last length:start_idx - last data:data];
             }
             last = start_idx;
+            i += 2; // 跳过这几个字节，防止重复判断
         }
     }
     if (last != -1) {
-        int nal_len = length - last;
-        if (nal_len >= 4) [self updateAnnexBBufferForRange:fbb dataBlock:dbb offset:last length:nal_len];
+        [self updateAnnexBBufferForRange:fbb dataBlock:dbb offset:last length:length - last data:data];
+    } else {
+        CMBlockBufferAppendBufferReference(fbb, dbb, 0, length, 0); // 找不到包头就全盘塞入
     }
     
     CMSampleBufferRef sb;
@@ -253,14 +277,17 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
     
     if (sbStatus == noErr) {
         [displayLayer enqueueSampleBuffer:sb];
-        if (_session) { VTDecompressionSessionDecodeFrame(_session, sb, kVTDecodeFrame_EnableAsynchronousDecompression, NULL, NULL); }
+        VTDecompressionSessionDecodeFrame(_session, sb, kVTDecodeFrame_EnableAsynchronousDecompression, NULL, NULL);
     } else {
-        M2_LOG("[Decode] ❌ 画面块封装失败: %d", (int)sbStatus);
+        M2_LOG("[Decode] ❌ SampleBuffer 构建失败: %d，请求服务器重发关键帧！", (int)sbStatus);
+        CFRelease(dbb); CFRelease(fbb); free(data);
+        return 1; // 🚨 这是终结黑屏死锁的最关键一行！
     }
     
     if (du->frameType == FRAME_TYPE_IDR) { 
         displayLayer.hidden = NO; 
         [_callbacks videoContentShown]; 
+        M2_LOG("[Decode] 🚀 画面解码出炉！");
     }
     
     CFRelease(dbb); CFRelease(fbb); if (sb) CFRelease(sb);
