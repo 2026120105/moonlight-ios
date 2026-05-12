@@ -25,15 +25,15 @@
 #include <stdlib.h>
 
 // ==========================================================
-// 🚀 [终极轨道] M2 AABB 2D包围盒 + 切角拓扑双材质光谱引擎
+// 🚀 [终极力学轨道] M2 动态质心引力 + 网格密度透视引擎
 // ==========================================================
 
-static int m2_udp_sock = -1;
-static struct sockaddr_in m2_pc_addr;
-
+// 升级结构体：加入 sum_x 和 sum_y 来累加所有红点，计算物理质心！
 typedef struct {
     int min_x, max_x, min_y, max_y;
     int pixel_count; 
+    long long sum_x; 
+    long long sum_y; 
 } TargetBlob;
 
 static void m2_process_frame(CVImageBufferRef pixelBuffer) {
@@ -44,9 +44,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         fcntl(m2_udp_sock, F_SETFL, fcntl(m2_udp_sock, F_GETFL, 0) | O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
-        
-        // 🚨 终极专线：死死绑定你电脑的以太网物理 IP！
-        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); 
+        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); // ⚠️ 确保是电脑的专线 IP
     }
 
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
@@ -68,8 +66,8 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         int start_y = (int)(height * 0.1); int end_y = (int)(height * 0.9);
         int start_x = (int)(width * 0.1);  int end_x = (int)(width * 0.9);
 
-        // 1. 🔍 第一层：粗略网格磁力聚类 (快速圈出所有红光可疑物)
-        int step = 3; 
+        // 1. 🔍 第一层：磁力收集与【质量累加】 (步长缩至2，极速精细扫描)
+        int step = 2; 
         for (int y = start_y; y < end_y; y += step) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
@@ -79,23 +77,28 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
 
                 uint8_t v = uvRow[(x / 2) * 2 + 1];
                 
-                // 基因锁：红/紫 V通道狂暴极值
-                if (v > 150) { 
+                // 🧬 基因锁微调：稍微放宽亮度(Y>25)，完美包容运动模糊产生的暗沉！
+                if (v > 140) { 
                     uint8_t y_val = yRow[x];
                     uint8_t u = uvRow[(x / 2) * 2];
                     
-                    if (y_val > 35 && u < 115) {
+                    // 💡 紫光抗性拉满：U 放宽到 <135，强行包容图3的紫色闪光，绝不跟丢！
+                    if (y_val > 25 && u < 135) {
                         int added = 0;
                         for (int i = 0; i < blob_count; i++) {
-                            // 磁力吸附半径：45像素，强行缝合被打碎的假人网格
-                            if (x >= blobs[i].min_x - 45 && x <= blobs[i].max_x + 45 &&
-                                y >= blobs[i].min_y - 45 && y <= blobs[i].max_y + 45) {
+                            // 🧲 磁力圈拉大到 55 像素！
+                            // 就算假人在高速运动中手脚被残影拉断，也能像强力胶一样重新缝合成一个人！
+                            if (x >= blobs[i].min_x - 55 && x <= blobs[i].max_x + 55 &&
+                                y >= blobs[i].min_y - 55 && y <= blobs[i].max_y + 55) {
                                 
                                 if (x < blobs[i].min_x) blobs[i].min_x = x;
                                 if (x > blobs[i].max_x) blobs[i].max_x = x;
                                 if (y < blobs[i].min_y) blobs[i].min_y = y;
                                 if (y > blobs[i].max_y) blobs[i].max_y = y;
+                                
                                 blobs[i].pixel_count++;
+                                blobs[i].sum_x += x; // 💀 叠加 X 质量
+                                blobs[i].sum_y += y; // 💀 叠加 Y 质量
                                 added = 1;
                                 break;
                             }
@@ -104,6 +107,8 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
                             blobs[blob_count].min_x = x; blobs[blob_count].max_x = x;
                             blobs[blob_count].min_y = y; blobs[blob_count].max_y = y;
                             blobs[blob_count].pixel_count = 1;
+                            blobs[blob_count].sum_x = x;
+                            blobs[blob_count].sum_y = y;
                             blob_count++;
                         }
                     }
@@ -111,7 +116,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
             }
         }
         
-        // 2. ⚖️ 第二层：开启显微镜 - 切角拓扑 + 双材质光谱过滤
+        // 2. ⚖️ 第二层：网格密度透视法与【质心瞄准】
         int best_x = -1, best_y = -1;
         long min_dist = 2000000000;
         
@@ -119,71 +124,46 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
             int w = blobs[i].max_x - blobs[i].min_x;
             int h = blobs[i].max_y - blobs[i].min_y;
             
-            // 🔪 锁一：物理大小与长宽比限制
-            if (w < 10 || h < 15 || w > 600 || h > 900) continue;
+            // 🔪 锁一：物理尺寸包容
+            if (w < 12 || h < 12 || w > 800 || h > 800) continue;
+            
+            // 🔪 锁二：狂野姿态解禁 (兼容极度拉伸的动作)
+            // 将长宽比放宽到极端的 0.40 ~ 5.5！不管是贴地滑铲/飞踢，还是垂直站立，通杀！
             float aspect = (float)h / (float)w;
-            if (aspect < 0.85f || aspect > 4.5f) continue;
+            if (aspect < 0.40f || aspect > 5.5f) continue;
             
-            int head_y_end = blobs[i].min_y + (int)(h * 0.20f); 
-            int head_min_x = 9999, head_max_x = -1;
-            int torso_min_x = 9999, torso_max_x = -1;
+            // 🔪 锁三：纯网格密度查杀 (The Wall Killer)
+            float max_pixels = (float)(w / step + 1) * (float)(h / step + 1);
+            float density = (float)blobs[i].pixel_count / max_pixels;
             
-            int corner_violation = 0;
-            int corner_w = (int)(w * 0.25f);
+            float max_allowed_density = 0.55f; // 近战网格默认最高密度 55% (无情过滤红墙)
             
-            int bright_flesh_count = 0;
-            int total_pixels = 0;
-            
-            // 深度精密扫描盒子内部特征
-            for (int py = blobs[i].min_y; py <= blobs[i].max_y; py += step) {
-                uint8_t *yRow = yPlane + py * yBytesPerRow;
-                uint8_t *uvRow = uvPlane + (py / 2) * uvBytesPerRow;
-                
-                for (int px = blobs[i].min_x; px <= blobs[i].max_x; px += step) {
-                    uint8_t v = uvRow[(px / 2) * 2 + 1];
-                    uint8_t y_val = yRow[px];
-                    uint8_t u = uvRow[(px / 2) * 2];
-                    
-                    total_pixels++;
-                    
-                    if (v > 150 && y_val > 35 && u < 115) {
-                        if (py < head_y_end) {
-                            if (px < head_min_x) head_min_x = px;
-                            if (px > head_max_x) head_max_x = px;
-                            
-                            // 肩部上空探测：防矩形红墙
-                            if (px < blobs[i].min_x + corner_w || px > blobs[i].max_x - corner_w) {
-                                corner_violation++;
-                            }
-                        } else {
-                            if (px < torso_min_x) torso_min_x = px;
-                            if (px > torso_max_x) torso_max_x = px;
-                        }
-                    }
-                    // 肉体高光底色探测：防死红色的油桶 (极其耀眼的偏肉色灰白点)
-                    else if (y_val > 110 && v >= 125 && v <= 150 && u > 100 && u < 135) {
-                        bright_flesh_count++;
-                    }
-                }
+            // 远距容错：如果目标极小(图5)，视频压缩会让它糊成实心红斑！动态放宽密度至 95%
+            if (w * h < 4000) {
+                max_allowed_density = 0.95f; 
             }
             
-            // 🔪 锁二：切角矩形查杀 (假人的头两侧绝不能有太多红点)
-            if (corner_violation > 8) continue;
+            // 实心红砖墙、微小红光噪点，全部在此被判死刑！
+            if (density < 0.02f || density > max_allowed_density) continue;
+
+            // ==========================================
+            // 🎯 目标确定，启动【物理质心牵引】！
+            // ==========================================
+            // 将所有红点的坐标求平均，得出躯干质量最密集的“绝对物理重心”
+            int com_x = (int)(blobs[i].sum_x / blobs[i].pixel_count);
+            int com_y = (int)(blobs[i].sum_y / blobs[i].pixel_count);
             
-            // 🔪 锁三：材质共生查杀 (近距离下，必须带有高反光的肉体底色特征)
-            if (h > 40) {
-                float flesh_ratio = (float)bright_flesh_count / (float)total_pixels;
-                if (flesh_ratio < 0.015f) continue;
+            int target_x = com_x;
+            int target_y;
+            
+            // 根据姿态自适应锁胸点：
+            if (aspect > 1.2f) {
+                // 🧍‍♂️ 站立/奔跑状态：质心通常在肚子。我们将其往上提拔身高的 12%，精准锁定胸锁骨！
+                target_y = com_y - (int)(h * 0.12f);
+            } else {
+                // 🛷 横飞/蹲伏状态：身体是横向的，质心本来就处于胸腹之间。原位锁定，枪枪到肉！
+                target_y = com_y;
             }
-
-            // 🔪 锁四：人类骨架比例查杀 (防直筒型电线杆)
-            int head_width = (head_max_x != -1 && head_max_x > head_min_x) ? (head_max_x - head_min_x) : w;
-            int torso_width = (torso_max_x != -1 && torso_max_x > torso_min_x) ? (torso_max_x - torso_min_x) : w;
-            if (head_width >= (int)(torso_width * 0.85f)) continue; 
-
-            // 🎯 完美幸存者，执行核心锁定：宽度取中，高度等比向下取 22% 锁死颈部/胸口
-            int target_x = blobs[i].min_x + w / 2;
-            int target_y = blobs[i].min_y + (int)(h * 0.22); 
             
             long dist = (target_x - cx)*(target_x - cx) + (target_y - cy)*(target_y - cy);
             if (dist < min_dist) {
@@ -193,7 +173,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
             }
         }
         
-        // 3. 将计算完成的光滑坐标极速发送到 PC
+        // 3. 将极其平滑的坐标极速发往 PC 雷达
         if (best_x != -1) {
             float dx = best_x - cx; float dy = best_y - cy;
             char msg[64];
