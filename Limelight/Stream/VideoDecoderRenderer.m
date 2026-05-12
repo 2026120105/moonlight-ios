@@ -14,35 +14,10 @@
 #include <fcntl.h>
 
 // ==========================================================
-// 📡 远程遥测模块 (UDP Logger)
+// 🧠 [M2 ANE] 异步纯旁路 AI 引擎 (零干涉架构)
 // ==========================================================
 static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
-
-// 初始化通信管道
-static void init_logger_once(void) {
-    if (m2_udp_sock != -1) return;
-    m2_udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    fcntl(m2_udp_sock, F_SETFL, O_NONBLOCK);
-    m2_pc_addr.sin_family = AF_INET;
-    m2_pc_addr.sin_port = htons(9999);
-    inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); // ⚠️ 确保这是你 PC 的 IP
-}
-
-// 向 PC 发送日志
-static void M2_LOG(const char *format, ...) {
-    init_logger_once();
-    char buffer[512];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-    sendto(m2_udp_sock, buffer, strlen(buffer), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
-}
-
-// ==========================================================
-// 🧠 [M2 ANE] 异步旁路 AI 引擎
-// ==========================================================
 static VNCoreMLModel *m2_ai_model = nil;
 static VNCoreMLRequest *m2_ai_request = nil;
 static dispatch_queue_t m2_queue = nil;
@@ -50,28 +25,25 @@ static dispatch_queue_t m2_queue = nil;
 static void m2_init_plugin(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        M2_LOG("[AI] 正在初始化神经插件...");
         m2_queue = dispatch_queue_create("com.m2.ai", DISPATCH_QUEUE_SERIAL);
-        
+        m2_udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        fcntl(m2_udp_sock, F_SETFL, O_NONBLOCK);
+        m2_pc_addr.sin_family = AF_INET;
+        m2_pc_addr.sin_port = htons(9999);
+        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); // ⚠️ 确保是你的 PC IP
+
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSURL *url = [[NSBundle mainBundle] URLForResource:@"best" withExtension:@"mlmodelc"];
-            if (!url) {
-                M2_LOG("[AI] ❌ 致命错误：找不到 best.mlmodelc！打包失败或路径错误。");
-                return;
-            }
-            M2_LOG("[AI] 找到模型文件，开始装载 ANE...");
-            
-            MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
-            config.computeUnits = MLComputeUnitsAll;
-            NSError *err = nil;
-            MLModel *ml = [MLModel modelWithContentsOfURL:url configuration:config error:&err];
-            if (ml) {
-                m2_ai_model = [VNCoreMLModel modelForMLModel:ml error:nil];
-                m2_ai_request = [[VNCoreMLRequest alloc] initWithModel:m2_ai_model];
-                m2_ai_request.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
-                M2_LOG("[AI] ✅ 神经引擎装载成功，准备就绪！");
-            } else {
-                M2_LOG("[AI] ❌ 模型装载失败：%@", [[err localizedDescription] UTF8String]);
+            if (url) {
+                MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
+                config.computeUnits = MLComputeUnitsAll;
+                MLModel *ml = [MLModel modelWithContentsOfURL:url configuration:config error:nil];
+                if (ml) {
+                    m2_ai_model = [VNCoreMLModel modelForMLModel:ml error:nil];
+                    m2_ai_request = [[VNCoreMLRequest alloc] initWithModel:m2_ai_model];
+                    m2_ai_request.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
+                    printf("✅ [M2 AI] 神经引擎后台点火成功！\n");
+                }
             }
         });
     });
@@ -83,24 +55,40 @@ static void m2_run_ai(CVImageBufferRef pix) {
     dispatch_async(m2_queue, ^{
         @autoreleasepool {
             VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pix options:@{}];
-            [h performRequests:@[m2_ai_request] error:nil];
-            // 暂时隐藏发送坐标的代码，先专注排查黑屏
+            if ([h performRequests:@[m2_ai_request] error:nil]) {
+                int w = (int)CVPixelBufferGetWidth(pix), h_px = (int)CVPixelBufferGetHeight(pix);
+                int best_x = -1, best_y = -1; float min_d = 1e10;
+                for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
+                    if (o.confidence > 0.45f) {
+                        CGRect b = o.boundingBox;
+                        int tx = (b.origin.x + b.size.width/2.0)*w;
+                        int ty = (1.0-b.origin.y-b.size.height*0.8)*h_px;
+                        float d = pow(tx-w/2.0, 2) + pow(ty-h_px/2.0, 2);
+                        if (d < min_d) { min_d = d; best_x = tx; best_y = ty; }
+                    }
+                }
+                if (best_x != -1) {
+                    char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", (float)(best_x-w/2), (float)(best_y-h_px/2));
+                    sendto(m2_udp_sock, m, (int)strlen(m), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+                } else {
+                    sendto(m2_udp_sock, "{\"f\":0}", 7, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+                }
+            }
             CFRelease(pix);
         }
     });
 }
 
-// ==========================================================
-// 🏗️ Moonlight 官方兼容层 (带探针)
-// ==========================================================
-extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int write_seq_header);
-
 static void m2_decompression_callback(void *refCon, void *sfRefCon, OSStatus status, VTDecodeInfoFlags info, CVImageBufferRef img, CMTime pts, CMTime dur) {
     if (status == noErr && img) {
-        m2_init_plugin();
         m2_run_ai(img);
     }
 }
+
+// ==========================================================
+// 🏗️ Moonlight 官方原汁原味渲染逻辑 (修复 NALU 破坏问题)
+// ==========================================================
+extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int write_seq_header);
 
 @implementation VideoDecoderRenderer {
     StreamView* _view;
@@ -112,153 +100,165 @@ static void m2_decompression_callback(void *refCon, void *sfRefCon, OSStatus sta
     CMVideoFormatDescriptionRef formatDesc;
     CADisplayLink* _displayLink;
     BOOL framePacing;
-    VTDecompressionSessionRef _session;
-    int debug_frame_count; // 用于限制日志刷屏
+    VTDecompressionSessionRef _m2Session; // AI 专属窃听会话
 }
 
 - (void)reinitializeDisplayLayer {
-    M2_LOG("[Video] 初始化/重置显示层...");
-    if (displayLayer) [displayLayer removeFromSuperlayer];
+    CALayer *oldLayer = displayLayer;
     displayLayer = [[AVSampleBufferDisplayLayer alloc] init];
     displayLayer.backgroundColor = [UIColor blackColor].CGColor;
-    displayLayer.videoGravity = AVLayerVideoGravityResize;
-    
-    float vW = _view.bounds.size.width, vH = _view.bounds.size.height;
-    if (vW > vH * _streamAspectRatio) vW = vH * _streamAspectRatio; else vH = vW / _streamAspectRatio;
+    CGSize videoSize;
+    if (_view.bounds.size.width > _view.bounds.size.height * _streamAspectRatio) {
+        videoSize = CGSizeMake(_view.bounds.size.height * _streamAspectRatio, _view.bounds.size.height);
+    } else {
+        videoSize = CGSizeMake(_view.bounds.size.width, _view.bounds.size.width / _streamAspectRatio);
+    }
     displayLayer.position = CGPointMake(CGRectGetMidX(_view.bounds), CGRectGetMidY(_view.bounds));
-    displayLayer.bounds = CGRectMake(0, 0, vW, vH);
-    [_view.layer addSublayer:displayLayer];
-    
-    if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
-    if (formatDesc) { CFRelease(formatDesc); formatDesc = nil; }
+    displayLayer.bounds = CGRectMake(0, 0, videoSize.width, videoSize.height);
+    displayLayer.videoGravity = AVLayerVideoGravityResize;
+    displayLayer.hidden = YES;
+    if (oldLayer != nil) [_view.layer replaceSublayer:oldLayer with:displayLayer];
+    else [_view.layer addSublayer:displayLayer];
+
+    if (formatDesc != nil) { CFRelease(formatDesc); formatDesc = nil; }
+    if (_m2Session != NULL) { VTDecompressionSessionInvalidate(_m2Session); CFRelease(_m2Session); _m2Session = NULL; }
 }
 
 - (id)initWithView:(StreamView*)view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio useFramePacing:(BOOL)useFramePacing {
     self = [super init];
     _view = view; _callbacks = callbacks; _streamAspectRatio = aspectRatio; framePacing = useFramePacing;
-    parameterSetBuffers = [NSMutableArray new];
-    debug_frame_count = 0;
-    M2_LOG("[System] VideoDecoderRenderer 初始化完毕");
+    parameterSetBuffers = [[NSMutableArray alloc] init];
     [self reinitializeDisplayLayer];
+    m2_init_plugin(); // 提前初始化 AI
     return self;
 }
 
 - (void)setupWithVideoFormat:(int)vf width:(int)vw height:(int)vh frameRate:(int)fr {
-    M2_LOG("[Video] 收到视频格式设置: Format %d, %dx%d @ %d fps", vf, vw, vh, fr);
     self->videoFormat = vf; self->frameRate = fr;
 }
 
 - (void)start {
-    M2_LOG("[Video] 启动 DisplayLink");
     _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayLinkCallback:)];
-    _displayLink.preferredFramesPerSecond = self->frameRate;
+    if (@available(iOS 15.0, tvOS 15.0, *)) {
+        _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(self->frameRate, self->frameRate, self->frameRate);
+    } else {
+        _displayLink.preferredFramesPerSecond = self->frameRate;
+    }
     [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
 }
 
+int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
+
 - (void)displayLinkCallback:(CADisplayLink *)sender {
-    VIDEO_FRAME_HANDLE h; PDECODE_UNIT du;
-    while (LiPollNextVideoFrame(&h, &du)) {
-        LiCompleteVideoFrame(h, DrSubmitDecodeUnit(du));
+    VIDEO_FRAME_HANDLE handle; PDECODE_UNIT du;
+    while (LiPollNextVideoFrame(&handle, &du)) {
+        LiCompleteVideoFrame(handle, DrSubmitDecodeUnit(du));
+        if (framePacing) {
+            double displayRefreshRate = 1 / (_displayLink.targetTimestamp - _displayLink.timestamp);
+            if (displayRefreshRate >= frameRate * 0.9f) {
+                if (LiGetPendingVideoFrames() == 1) break;
+            }
+        }
     }
 }
 
 - (void)stop {
-    M2_LOG("[Video] 停止视频流");
     [_displayLink invalidate];
-    if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
+    if (_m2Session != NULL) { VTDecompressionSessionInvalidate(_m2Session); CFRelease(_m2Session); _m2Session = NULL; }
 }
 
-int DrSubmitDecodeUnit(PDECODE_UNIT du);
+#define NALU_START_PREFIX_SIZE 3
+#define NAL_LENGTH_PREFIX_SIZE 4
 
-- (int)submitDecodeBuffer:(unsigned char *)data length:(int)length bufferType:(int)bt decodeUnit:(PDECODE_UNIT)du {
-    if (debug_frame_count < 20) {
-        M2_LOG("[Decode] 收到帧数据: length=%d, type=%d", length, du->frameType);
-        debug_frame_count++;
-    }
+// 🛡️ 原汁原味的封装函数，不破坏任何 H.264 结构
+- (void)updateAnnexBBufferForRange:(CMBlockBufferRef)frameBuffer dataBlock:(CMBlockBufferRef)dataBuffer offset:(int)offset length:(int)nalLength {
+    OSStatus status;
+    size_t oldOffset = CMBlockBufferGetDataLength(frameBuffer);
+    status = CMBlockBufferAppendMemoryBlock(frameBuffer, NULL, NAL_LENGTH_PREFIX_SIZE, kCFAllocatorDefault, NULL, 0, NAL_LENGTH_PREFIX_SIZE, 0);
+    if (status != noErr) return;
+    const int dataLength = nalLength - NALU_START_PREFIX_SIZE;
+    const uint8_t lengthBytes[] = {(uint8_t)(dataLength >> 24), (uint8_t)(dataLength >> 16), (uint8_t)(dataLength >> 8), (uint8_t)dataLength};
+    status = CMBlockBufferReplaceDataBytes(lengthBytes, frameBuffer, oldOffset, NAL_LENGTH_PREFIX_SIZE);
+    if (status != noErr) return;
+    status = CMBlockBufferAppendBufferReference(frameBuffer, dataBuffer, offset + NALU_START_PREFIX_SIZE, dataLength, 0);
+}
 
+- (int)submitDecodeBuffer:(unsigned char *)data length:(int)length bufferType:(int)bufferType decodeUnit:(PDECODE_UNIT)du {
+    OSStatus status;
     if (du->frameType == FRAME_TYPE_IDR) {
-        M2_LOG("[Decode] 接收到关键帧 (IDR)!");
-        if (bt != 4) {
-            if (bt >= 1 && bt <= 3) [parameterSetBuffers addObject:[NSData dataWithBytes:&data[data[2]==0x01?3:4] length:length-(data[2]==0x01?3:4)]];
-            return 0;
+        if (bufferType != 4) { // BUFFER_TYPE_PICDATA
+            if (bufferType >= 1 && bufferType <= 3) {
+                int startLen = data[2] == 0x01 ? 3 : 4;
+                [parameterSetBuffers addObject:[NSData dataWithBytes:&data[startLen] length:length - startLen]];
+            }
+            return 0; // DR_OK
         }
-        [self reinitializeDisplayLayer];
-        size_t pc = [parameterSetBuffers count];
-        const uint8_t* pps[pc]; size_t pss[pc];
-        for (int i=0; i<pc; i++) { NSData* p = parameterSetBuffers[i]; pps[i]=p.bytes; pss[i]=p.length; }
+        if (formatDesc != NULL) { CFRelease(formatDesc); formatDesc = NULL; }
+        if (_m2Session != NULL) { VTDecompressionSessionInvalidate(_m2Session); CFRelease(_m2Session); _m2Session = NULL; }
         
-        if (videoFormat & 0x01) {
-            CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, pc, pps, pss, 4, &formatDesc);
-        } else if (videoFormat & 0x02) {
-            CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, pc, pps, pss, 4, NULL, &formatDesc);
+        size_t parameterSetCount = [parameterSetBuffers count];
+        const uint8_t* parameterSetPointers[parameterSetCount];
+        size_t parameterSetSizes[parameterSetCount];
+        for (int i = 0; i < parameterSetCount; i++) {
+            NSData* parameterSet = parameterSetBuffers[i];
+            parameterSetPointers[i] = parameterSet.bytes; parameterSetSizes[i] = parameterSet.length;
+        }
+        
+        if (videoFormat & 0x01) { // H264
+            status = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, parameterSetCount, parameterSetPointers, parameterSetSizes, NAL_LENGTH_PREFIX_SIZE, &formatDesc);
+        } else if (videoFormat & 0x02) { // HEVC
+            status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault, parameterSetCount, parameterSetPointers, parameterSetSizes, NAL_LENGTH_PREFIX_SIZE, NULL, &formatDesc);
         }
         [parameterSetBuffers removeAllObjects];
         
-        if (!formatDesc) {
-            M2_LOG("[Decode] ❌ 致命错误：formatDesc 创建失败！H.264/H.265 头数据可能不匹配。");
-            free(data); return 1;
+        // 🧠 为 AI 旁路创建专门的解码会话
+        if (formatDesc) {
+            VTDecompressionOutputCallbackRecord cb = {0};
+            cb.decompressionOutputCallback = m2_decompression_callback;
+            NSDictionary *attrs = @{ (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) };
+            VTDecompressionSessionCreate(kCFAllocatorDefault, formatDesc, NULL, (__bridge CFDictionaryRef)attrs, &cb, &_m2Session);
         }
+    }
+    
+    if (formatDesc == NULL) { free(data); return 1; } // DR_NEED_IDR
+    
+    CMBlockBufferRef frameBlockBuffer; CMBlockBufferRef dataBlockBuffer;
+    status = CMBlockBufferCreateWithMemoryBlock(NULL, data, length, kCFAllocatorDefault, NULL, 0, length, 0, &dataBlockBuffer);
+    if (status != noErr) { free(data); return 1; }
+    status = CMBlockBufferCreateEmpty(NULL, 0, 0, &frameBlockBuffer);
+    
+    // 🛡️ 使用最原始的转换算法，确保底层解码器不罢工
+    int lastOffset = -1;
+    for (int i = 0; i < length - NALU_START_PREFIX_SIZE; i++) {
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
+            if (lastOffset != -1) [self updateAnnexBBufferForRange:frameBlockBuffer dataBlock:dataBlockBuffer offset:lastOffset length:i - lastOffset];
+            lastOffset = i;
+        }
+    }
+    if (lastOffset != -1) [self updateAnnexBBufferForRange:frameBlockBuffer dataBlock:dataBlockBuffer offset:lastOffset length:length - lastOffset];
+    
+    CMSampleBufferRef sampleBuffer;
+    CMSampleTimingInfo sampleTiming = {kCMTimeInvalid, CMTimeMake(du->presentationTimeMs, 1000), kCMTimeInvalid};
+    status = CMSampleBufferCreateReady(kCFAllocatorDefault, frameBlockBuffer, formatDesc, 1, 1, &sampleTiming, 0, NULL, &sampleBuffer);
+    
+    if (status == noErr) {
+        // 🚀 原版渲染：直接丢给系统层，画面秒出！
+        [self->displayLayer enqueueSampleBuffer:sampleBuffer];
         
-        VTDecompressionOutputCallbackRecord cb = {m2_decompression_callback, (__bridge void *)self};
-        NSDictionary *attr = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)};
-        OSStatus status = VTDecompressionSessionCreate(NULL, formatDesc, NULL, (__bridge CFDictionaryRef)attr, &cb, &_session);
-        
-        if (status != noErr || !_session) {
-            M2_LOG("[Decode] ❌ 致命错误：VideoToolbox 解码会话创建失败! OSStatus: %d", (int)status);
-        } else {
-            M2_LOG("[Decode] ✅ VTDecompressionSession 创建成功！");
+        // 🧠 AI 旁路：喂给隐藏解码器去解析坐标
+        if (_m2Session) {
+            VTDecompressionSessionDecodeFrame(_m2Session, sampleBuffer, kVTDecodeFrame_EnableAsynchronousDecompression, NULL, NULL);
         }
     }
     
-    if (!formatDesc || !_session) { free(data); return 1; }
-    
-    CMBlockBufferRef fbb, dbb;
-    CMBlockBufferCreateWithMemoryBlock(NULL, data, length, kCFAllocatorDefault, NULL, 0, length, 0, &dbb);
-    CMBlockBufferCreateEmpty(NULL, 0, 0, &fbb);
-    
-    int last = -1;
-    for (int i=0; i<length-3; i++) {
-        if (data[i]==0 && data[i+1]==0 && data[i+2]==1) {
-            if (last != -1) {
-                size_t old = CMBlockBufferGetDataLength(fbb);
-                CMBlockBufferAppendMemoryBlock(fbb, NULL, 4, kCFAllocatorDefault, NULL, 0, 4, 0);
-                int dl = i - last - 3;
-                uint8_t lb[] = {(uint8_t)(dl>>24),(uint8_t)(dl>>16),(uint8_t)(dl>>8),(uint8_t)dl};
-                CMBlockBufferReplaceDataBytes(lb, fbb, old, 4);
-                CMBlockBufferAppendBufferReference(fbb, dbb, last+3, dl, 0);
-            }
-            last = i;
-        }
-    }
-    if (last != -1) {
-        size_t old = CMBlockBufferGetDataLength(fbb);
-        CMBlockBufferAppendMemoryBlock(fbb, NULL, 4, kCFAllocatorDefault, NULL, 0, 4, 0);
-        int dl = length - last - 3;
-        uint8_t lb[] = {(uint8_t)(dl>>24),(uint8_t)(dl>>16),(uint8_t)(dl>>8),(uint8_t)dl};
-        CMBlockBufferReplaceDataBytes(lb, fbb, old, 4);
-        CMBlockBufferAppendBufferReference(fbb, dbb, last+3, dl, 0);
-    }
-
-    CMSampleBufferRef sb;
-    CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(du->presentationTimeMs, 1000), kCMTimeInvalid};
-    OSStatus sbStatus = CMSampleBufferCreateReady(NULL, fbb, formatDesc, 1, 1, &ti, 0, NULL, &sb);
-    
-    if (sbStatus != noErr) {
-        if (debug_frame_count < 25) { M2_LOG("[Decode] ❌ SampleBuffer 创建失败: %d", (int)sbStatus); debug_frame_count++; }
-        CFRelease(dbb); CFRelease(fbb); free(data); return 1;
+    if (du->frameType == FRAME_TYPE_IDR) {
+        self->displayLayer.hidden = NO;
+        [self->_callbacks videoContentShown];
     }
     
-    [displayLayer enqueueSampleBuffer:sb];
-    VTDecompressionSessionDecodeFrame(_session, sb, 0, NULL, NULL);
-    
-    if (du->frameType == FRAME_TYPE_IDR) { 
-        displayLayer.hidden = NO; 
-        [_callbacks videoContentShown]; 
-        M2_LOG("[Decode] 🚀 关键帧渲染完成，通知上层消除黑屏！");
-    }
-    
-    CFRelease(dbb); CFRelease(fbb); CFRelease(sb);
-    return 0;
+    CFRelease(dataBlockBuffer); CFRelease(frameBlockBuffer);
+    if (sampleBuffer) CFRelease(sampleBuffer);
+    return 0; // DR_OK
 }
 
 - (void)setHdrMode:(BOOL)enabled {}
