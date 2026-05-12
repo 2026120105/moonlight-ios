@@ -25,15 +25,18 @@
 #include <stdlib.h>
 
 // ==========================================================
-// 🚀 [终极力学轨道] M2 动态质心引力 + 网格密度透视引擎
+// 🚀 [终极力学轨道] M2 动态质心引力 + 纯网格密度引擎 (完美专线版)
 // ==========================================================
 
-// 升级结构体：加入 sum_x 和 sum_y 来累加所有红点，计算物理质心！
+static int m2_udp_sock = -1;
+static struct sockaddr_in m2_pc_addr;
+
+// 存储包围盒、像素数量，以及用于计算“物理质心”的坐标总和
 typedef struct {
     int min_x, max_x, min_y, max_y;
     int pixel_count; 
-    long long sum_x; 
-    long long sum_y; 
+    long long sum_x; // 累加所有像素的 X 坐标，用于求质心
+    long long sum_y; // 累加所有像素的 Y 坐标，用于求质心
 } TargetBlob;
 
 static void m2_process_frame(CVImageBufferRef pixelBuffer) {
@@ -44,7 +47,9 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         fcntl(m2_udp_sock, F_SETFL, fcntl(m2_udp_sock, F_GETFL, 0) | O_NONBLOCK);
         m2_pc_addr.sin_family = AF_INET;
         m2_pc_addr.sin_port = htons(9999);
-        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); // ⚠️ 确保是电脑的专线 IP
+        
+        // 🚨 终极专线：确保这是你电脑的有线专线 IP！
+        inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr); 
     }
 
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
@@ -66,28 +71,27 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
         int start_y = (int)(height * 0.1); int end_y = (int)(height * 0.9);
         int start_x = (int)(width * 0.1);  int end_x = (int)(width * 0.9);
 
-        // 1. 🔍 第一层：磁力收集与【质量累加】 (步长缩至2，极速精细扫描)
+        // 1. 🔍 第一层：磁力收集与【质量累加】 (步长2，极速穿插网格条纹)
         int step = 2; 
         for (int y = start_y; y < end_y; y += step) {
             uint8_t *yRow = yPlane + y * yBytesPerRow;
             uint8_t *uvRow = uvPlane + (y / 2) * uvBytesPerRow;
             
             for (int x = start_x; x < end_x; x += step) {
+                // 屏蔽准星的自干扰
                 if (abs(x - cx) < 30 && abs(y - cy) < 30) continue;
 
                 uint8_t v = uvRow[(x / 2) * 2 + 1];
                 
-                // 🧬 基因锁微调：稍微放宽亮度(Y>25)，完美包容运动模糊产生的暗沉！
-                if (v > 140) { 
+                // 🎯 完美基因锁：基于你提取的8组色彩样本严密推导
+                if (v > 145) { 
                     uint8_t y_val = yRow[x];
                     uint8_t u = uvRow[(x / 2) * 2];
                     
-                    // 💡 紫光抗性拉满：U 放宽到 <135，强行包容图3的紫色闪光，绝不跟丢！
-                    if (y_val > 25 && u < 135) {
+                    if (y_val > 30 && u < 125) {
                         int added = 0;
                         for (int i = 0; i < blob_count; i++) {
-                            // 🧲 磁力圈拉大到 55 像素！
-                            // 就算假人在高速运动中手脚被残影拉断，也能像强力胶一样重新缝合成一个人！
+                            // 🧲 磁力圈：55像素的强力融合，无视肢体在高速运动中产生残影断裂
                             if (x >= blobs[i].min_x - 55 && x <= blobs[i].max_x + 55 &&
                                 y >= blobs[i].min_y - 55 && y <= blobs[i].max_y + 55) {
                                 
@@ -116,7 +120,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
             }
         }
         
-        // 2. ⚖️ 第二层：网格密度透视法与【质心瞄准】
+        // 2. ⚖️ 第二层：网格透视法与【质心瞄准】
         int best_x = -1, best_y = -1;
         long min_dist = 2000000000;
         
@@ -124,44 +128,41 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
             int w = blobs[i].max_x - blobs[i].min_x;
             int h = blobs[i].max_y - blobs[i].min_y;
             
-            // 🔪 锁一：物理尺寸包容
+            // 🔪 锁一：物理尺寸包容 (防单点小火花干扰)
             if (w < 12 || h < 12 || w > 800 || h > 800) continue;
             
-            // 🔪 锁二：狂野姿态解禁 (兼容极度拉伸的动作)
-            // 将长宽比放宽到极端的 0.40 ~ 5.5！不管是贴地滑铲/飞踢，还是垂直站立，通杀！
+            // 🔪 锁二：狂野姿态解禁 (0.35 ~ 6.0 包容滑铲飞踢、高空下落拉伸)
             float aspect = (float)h / (float)w;
-            if (aspect < 0.40f || aspect > 5.5f) continue;
+            if (aspect < 0.35f || aspect > 6.0f) continue;
             
-            // 🔪 锁三：纯网格密度查杀 (The Wall Killer)
+            // 🔪 锁三：纯网格密度查杀 (无情秒杀实心红墙、红箱子)
             float max_pixels = (float)(w / step + 1) * (float)(h / step + 1);
             float density = (float)blobs[i].pixel_count / max_pixels;
             
-            float max_allowed_density = 0.55f; // 近战网格默认最高密度 55% (无情过滤红墙)
+            float max_allowed_density = 0.60f; // 正常网格最高 60% 密度
             
-            // 远距容错：如果目标极小(图5)，视频压缩会让它糊成实心红斑！动态放宽密度至 95%
+            // 目标越远，马赛克越重，越容易糊成实心块。微小目标放宽密度上限到 95%
             if (w * h < 4000) {
                 max_allowed_density = 0.95f; 
             }
-            
-            // 实心红砖墙、微小红光噪点，全部在此被判死刑！
             if (density < 0.02f || density > max_allowed_density) continue;
 
             // ==========================================
             // 🎯 目标确定，启动【物理质心牵引】！
             // ==========================================
-            // 将所有红点的坐标求平均，得出躯干质量最密集的“绝对物理重心”
+            // 将框内成千上万个红点坐标求平均，得出躯干最密集的绝对物理重心！
+            // 彻底解决挥手、抬枪导致准星猛跳的终极问题！
             int com_x = (int)(blobs[i].sum_x / blobs[i].pixel_count);
             int com_y = (int)(blobs[i].sum_y / blobs[i].pixel_count);
             
             int target_x = com_x;
             int target_y;
             
-            // 根据姿态自适应锁胸点：
             if (aspect > 1.2f) {
-                // 🧍‍♂️ 站立/奔跑状态：质心通常在肚子。我们将其往上提拔身高的 12%，精准锁定胸锁骨！
+                // 🧍‍♂️ 站立跑动姿态：质心位于肚子，向上提拔身高的 12%，精准死锁胸膛
                 target_y = com_y - (int)(h * 0.12f);
             } else {
-                // 🛷 横飞/蹲伏状态：身体是横向的，质心本来就处于胸腹之间。原位锁定，枪枪到肉！
+                // 🛷 滑铲横飞姿态：躯干横摆，质心直接暴露在胸腹核心，无需拉升原位锁死
                 target_y = com_y;
             }
             
@@ -173,7 +174,7 @@ static void m2_process_frame(CVImageBufferRef pixelBuffer) {
             }
         }
         
-        // 3. 将极其平滑的坐标极速发往 PC 雷达
+        // 3. 将极其平滑的质心坐标，极速顺着网线发往 PC 雷达
         if (best_x != -1) {
             float dx = best_x - cx; float dy = best_y - cy;
             char msg[64];
@@ -202,7 +203,7 @@ static void m2_decompression_callback(
 }
 // ==========================================================
 
-// 后面的 @implementation VideoDecoderRenderer { ... } 及苹果官方源码部分完全保持不变，确保无缝接入。
+// 后续 Moonlight 官方接口完美兼容部分
 extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
                               int write_seq_header);
 
@@ -402,7 +403,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     }
     if (formatDesc == NULL) { free(data); return DR_NEED_IDR; }
     
-    // 挂载旁路解码回调
+    // 挂载 M2 硬件旁路窃听
     if (_m2Session == NULL) {
         VTDecompressionOutputCallbackRecord cb = {0};
         cb.decompressionOutputCallback = m2_decompression_callback;
@@ -435,10 +436,10 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     CMSampleTimingInfo sampleTiming = {kCMTimeInvalid, CMTimeMake(du->presentationTimeMs, 1000), kCMTimeInvalid};
     status = CMSampleBufferCreateReady(kCFAllocatorDefault, frameBlockBuffer, formatDesc, 1, 1, &sampleTiming, 0, NULL, &sampleBuffer);
     
-    // 正常显示
+    // 原版正常显示
     [self->displayLayer enqueueSampleBuffer:sampleBuffer];
     
-    // 旁路解码
+    // 注入雷达解码执行暗杀锁定
     if (_m2Session) {
         VTDecompressionSessionDecodeFrame(_m2Session, sampleBuffer, kVTDecodeFrame_EnableAsynchronousDecompression, NULL, NULL);
     }
