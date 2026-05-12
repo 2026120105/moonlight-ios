@@ -17,12 +17,35 @@ jobs:
           path: my_fork_temp
           submodules: false
           
-      - name: 💉 3. 瞬间打补丁：植入 M2 雷达代码
-        run: |
-          cp my_fork_temp/Limelight/Stream/VideoDecoderRenderer.m Limelight/Stream/VideoDecoderRenderer.m
-          echo "✅ M2 旁路雷达代码植入完成！"
+      - name: 🐍 3. 部署 Python 炼丹炉 (避开 macOS 系统级隔离)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
           
-      - name: 🔨 4. 启动物理真机无情编译
+      - name: 💉 4. 瞬间打补丁：植入 C 源码与 AI 大脑
+        run: |
+          # 替换解码器源码
+          cp my_fork_temp/Limelight/Stream/VideoDecoderRenderer.m Limelight/Stream/VideoDecoderRenderer.m
+          # 将你上传到仓库的大脑模型提取到当前工作区
+          cp my_fork_temp/best.pt best.pt
+          echo "✅ M2 旁路雷达代码与 best.pt 转移完成！"
+
+      - name: 🧠 5. AI 大脑云端转化与物理注入 (终极法术)
+        run: |
+          # 安装转化依赖包
+          pip install ultralytics coremltools
+          
+          # Python 转化：生成苹果原生架构并固化 NMS 算法
+          python -c "from ultralytics import YOLO; model = YOLO('best.pt'); model.export(format='coreml', nms=True, imgsz=416)"
+          
+          # 苹果原生编译：将模型彻底压制为 ANE 底层二进制文件
+          xcrun coremlcompiler compile best.mlpackage .
+          
+          # Ruby 暴力植入：撬开 Xcode 工程配置，强行注册神经核
+          gem install xcodeproj
+          ruby -e "require 'xcodeproj'; project = Xcodeproj::Project.open(Dir.glob('**/*.xcodeproj').first); target = project.targets.first; file = project.main_group.new_reference('best.mlmodelc'); target.resources_build_phase.add_file_reference(file); project.save"
+          
+      - name: 🔨 6. 启动物理真机无情编译
         run: |
           # 🚨 终极修复：使用原生的 -project 替代 -workspace！
           xcodebuild build \
@@ -36,13 +59,13 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
             
-      - name: 📦 5. 提取纯净 APP 并打包为巨魔 IPA
+      - name: 📦 7. 提取纯净 APP 并打包为巨魔 IPA
         run: |
           mkdir -p Payload
           cp -r build_output/Build/Products/Release-iphoneos/Moonlight.app Payload/
           zip -r Moonlight.ipa Payload
           
-      - name: 📤 6. 上传最终成品
+      - name: 📤 8. 上传最终成品
         uses: actions/upload-artifact@v4
         with:
           name: Moonlight-M2-Tracker
