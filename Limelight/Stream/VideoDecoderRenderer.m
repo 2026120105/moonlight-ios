@@ -12,6 +12,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <math.h>
+#include <objc/runtime.h>
 #include <stdatomic.h> // 引入原子锁机制
 
 // ==========================================================
@@ -61,6 +63,56 @@ static BOOL m2_is_diren_observation(VNRecognizedObjectObservation *observation) 
     return [label.identifier isEqualToString:@"diren"] && label.confidence > AI_CONFIDENCE_THRESHOLD;
 }
 
+static double m2_multiarray_value(MLMultiArray *array, NSInteger offset) {
+    switch (array.dataType) {
+        case MLMultiArrayDataTypeDouble:
+            return ((double *)array.dataPointer)[offset];
+        case MLMultiArrayDataTypeFloat32:
+            return ((float *)array.dataPointer)[offset];
+        case MLMultiArrayDataTypeInt32:
+            return ((int32_t *)array.dataPointer)[offset];
+        default:
+            return 0.0;
+    }
+}
+
+static void m2_consider_target(int tx, int ty, int w, int h_px, int *best_x, int *best_y, float *min_d) {
+    float d = pow(tx - w / 2.0, 2) + pow(ty - h_px / 2.0, 2);
+    if (d < *min_d) {
+        *min_d = d;
+        *best_x = tx;
+        *best_y = ty;
+    }
+}
+
+static void m2_consider_yolo_array(MLMultiArray *array, int w, int h_px, int *best_x, int *best_y, float *min_d) {
+    NSInteger rank = array.shape.count;
+    if (rank < 2 || [array.shape[rank - 1] integerValue] < 6) return;
+
+    NSInteger rows = [array.shape[rank - 2] integerValue];
+    NSInteger rowStride = [array.strides[rank - 2] integerValue];
+    NSInteger valueStride = [array.strides[rank - 1] integerValue];
+
+    for (NSInteger row = 0; row < rows; row++) {
+        NSInteger base = row * rowStride;
+        double x1 = m2_multiarray_value(array, base + 0 * valueStride);
+        double y1 = m2_multiarray_value(array, base + 1 * valueStride);
+        double x2 = m2_multiarray_value(array, base + 2 * valueStride);
+        double y2 = m2_multiarray_value(array, base + 3 * valueStride);
+        double confidence = m2_multiarray_value(array, base + 4 * valueStride);
+        int class_id = (int)llround(m2_multiarray_value(array, base + 5 * valueStride));
+
+        if (class_id != 0 || confidence <= AI_CONFIDENCE_THRESHOLD) continue;
+
+        double scaleX = (x2 <= 1.5 && x1 <= 1.5) ? w : (double)w / 416.0;
+        double scaleY = (y2 <= 1.5 && y1 <= 1.5) ? h_px : (double)h_px / 416.0;
+        int tx = (int)((x1 + x2) * 0.5 * scaleX);
+        int ty = (int)((y1 + (y2 - y1) * (1.0 - AI_AIM_OFFSET)) * scaleY);
+
+        m2_consider_target(tx, ty, w, h_px, best_x, best_y, min_d);
+    }
+}
+
 static void m2_init_plugin(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -98,18 +150,26 @@ static void m2_run_ai(CVImageBufferRef pix) {
                 int w = (int)CVPixelBufferGetWidth(pix), h_px = (int)CVPixelBufferGetHeight(pix);
                 int best_x = -1, best_y = -1; float min_d = 1e10;
                 
-                for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
+                for (VNObservation *result in m2_ai_request.results) {
                     // 原逻辑：所有超过阈值的检测框都会参与排序，最终只输出离屏幕中心最近的一个目标坐标。
-                    // 现在保留同样的排序和输出方式，但只允许类别为 diren 的检测框参与。
-                    if (!m2_is_diren_observation(o)) continue;
+                    // 现在保留同样的排序和输出方式，但只允许类别为 diren 的检测结果参与。
+                    if ([result isKindOfClass:[VNRecognizedObjectObservation class]]) {
+                        VNRecognizedObjectObservation *o = (VNRecognizedObjectObservation *)result;
+                        if (!m2_is_diren_observation(o)) continue;
 
-                    CGRect b = o.boundingBox;
-                    // Vision 框架会自动帮我们把坐标还原回原图 (1080P/4K) 的比例
-                    int tx = (b.origin.x + b.size.width/2.0)*w;
-                    int ty = (1.0-b.origin.y-b.size.height*(1.0-AI_AIM_OFFSET))*h_px;
-                    
-                    float d = pow(tx-w/2.0, 2) + pow(ty-h_px/2.0, 2);
-                    if (d < min_d) { min_d = d; best_x = tx; best_y = ty; }
+                        CGRect b = o.boundingBox;
+                        // Vision 检测框是归一化坐标，原点在左下角。
+                        int tx = (b.origin.x + b.size.width / 2.0) * w;
+                        int ty = (1.0 - b.origin.y - b.size.height * (1.0 - AI_AIM_OFFSET)) * h_px;
+                        m2_consider_target(tx, ty, w, h_px, &best_x, &best_y, &min_d);
+                    } else if ([result isKindOfClass:[VNCoreMLFeatureValueObservation class]]) {
+                        VNCoreMLFeatureValueObservation *o = (VNCoreMLFeatureValueObservation *)result;
+                        if (o.featureValue.type == MLFeatureTypeMultiArray) {
+                            m2_consider_yolo_array(o.featureValue.multiArrayValue, w, h_px, &best_x, &best_y, &min_d);
+                        }
+                    } else {
+                        M2_LOG("[AI] 跳过未知 Vision 结果类型: %s", object_getClassName(result));
+                    }
                 }
                 if (best_x != -1) {
                     char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", (float)(best_x-w/2), (float)(best_y-h_px/2));
