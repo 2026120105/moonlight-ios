@@ -25,7 +25,7 @@ jobs:
 
       - name: 🧠 3. AI 大脑转化与物理注入
         run: |
-          pip install ultralytics coremltools
+          pip install "numpy<2.4" ultralytics coremltools
           # 验证 best.pt 是否存在
           if [ -f "best.pt" ]; then
             echo "🎯 发现 best.pt，开始炼化苹果原生灵魂..."
