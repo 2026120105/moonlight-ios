@@ -33,7 +33,7 @@ jobs:
       - name: 🧠 5. AI 大脑云端转化与物理注入 (终极法术)
         run: |
           # 安装转化依赖包
-          pip install "numpy<2.4" ultralytics coremltools
+          pip install ultralytics coremltools
           
           # Python 转化：生成苹果原生架构并固化 NMS 算法
           python -c "from ultralytics import YOLO; model = YOLO('best.pt'); model.export(format='coreml', nms=True, imgsz=416)"
