@@ -55,12 +55,6 @@ static dispatch_queue_t m2_queue = nil;
 // 🛡️ 核心修复 1：原子锁，防止 4K 120FPS 撑爆显存
 static atomic_bool ai_is_busy = false;
 
-static BOOL m2_is_diren_observation(VNRecognizedObjectObservation *observation) {
-    if (observation.labels.count == 0) return NO;
-    VNClassificationObservation *label = observation.labels.firstObject;
-    return [label.identifier isEqualToString:@"diren"] && label.confidence > AI_CONFIDENCE_THRESHOLD;
-}
-
 static void m2_init_plugin(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -99,17 +93,16 @@ static void m2_run_ai(CVImageBufferRef pix) {
                 int best_x = -1, best_y = -1; float min_d = 1e10;
                 
                 for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
-                    // 原逻辑：所有超过阈值的检测框都会参与排序，最终只输出离屏幕中心最近的一个目标坐标。
-                    // 现在保留同样的排序和输出方式，但只允许类别为 diren 的检测框参与。
-                    if (!m2_is_diren_observation(o)) continue;
-
-                    CGRect b = o.boundingBox;
-                    // Vision 框架会自动帮我们把坐标还原回原图 (1080P/4K) 的比例
-                    int tx = (b.origin.x + b.size.width/2.0)*w;
-                    int ty = (1.0-b.origin.y-b.size.height*(1.0-AI_AIM_OFFSET))*h_px;
-                    
-                    float d = pow(tx-w/2.0, 2) + pow(ty-h_px/2.0, 2);
-                    if (d < min_d) { min_d = d; best_x = tx; best_y = ty; }
+                    // 读取顶部宏定义的阈值
+                    if (o.confidence > AI_CONFIDENCE_THRESHOLD) {
+                        CGRect b = o.boundingBox;
+                        // Vision 框架会自动帮我们把坐标还原回原图 (1080P/4K) 的比例
+                        int tx = (b.origin.x + b.size.width/2.0)*w;
+                        int ty = (1.0-b.origin.y-b.size.height*(1.0-AI_AIM_OFFSET))*h_px;
+                        
+                        float d = pow(tx-w/2.0, 2) + pow(ty-h_px/2.0, 2);
+                        if (d < min_d) { min_d = d; best_x = tx; best_y = ty; }
+                    }
                 }
                 if (best_x != -1) {
                     char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", (float)(best_x-w/2), (float)(best_y-h_px/2));
