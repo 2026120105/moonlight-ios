@@ -144,53 +144,44 @@ static void m2_run_ai(CVImageBufferRef pix) {
     
     CFRetain(pix);
     dispatch_async(m2_queue, ^{
-        @try {
-            @autoreleasepool {
-                VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pix options:@{}];
-                NSError *requestError = nil;
-                if ([h performRequests:@[m2_ai_request] error:&requestError]) {
-                    int w = (int)CVPixelBufferGetWidth(pix), h_px = (int)CVPixelBufferGetHeight(pix);
-                    int best_x = -1, best_y = -1; float min_d = 1e10;
-                    
-                    for (VNObservation *result in m2_ai_request.results) {
-                        // 原逻辑：所有超过阈值的检测框都会参与排序，最终只输出离屏幕中心最近的一个目标坐标。
-                        // 现在保留同样的排序和输出方式，但只允许类别为 diren 的检测结果参与。
-                        if ([result isKindOfClass:[VNRecognizedObjectObservation class]]) {
-                            VNRecognizedObjectObservation *o = (VNRecognizedObjectObservation *)result;
-                            if (!m2_is_diren_observation(o)) continue;
+        @autoreleasepool {
+            VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pix options:@{}];
+            if ([h performRequests:@[m2_ai_request] error:nil]) {
+                int w = (int)CVPixelBufferGetWidth(pix), h_px = (int)CVPixelBufferGetHeight(pix);
+                int best_x = -1, best_y = -1; float min_d = 1e10;
+                
+                for (VNObservation *result in m2_ai_request.results) {
+                    // 原逻辑：所有超过阈值的检测框都会参与排序，最终只输出离屏幕中心最近的一个目标坐标。
+                    // 现在保留同样的排序和输出方式，但只允许类别为 diren 的检测结果参与。
+                    if ([result isKindOfClass:[VNRecognizedObjectObservation class]]) {
+                        VNRecognizedObjectObservation *o = (VNRecognizedObjectObservation *)result;
+                        if (!m2_is_diren_observation(o)) continue;
 
-                            CGRect b = o.boundingBox;
-                            // Vision 检测框是归一化坐标，原点在左下角。
-                            int tx = (b.origin.x + b.size.width / 2.0) * w;
-                            int ty = (1.0 - b.origin.y - b.size.height * (1.0 - AI_AIM_OFFSET)) * h_px;
-                            m2_consider_target(tx, ty, w, h_px, &best_x, &best_y, &min_d);
-                        } else if ([result isKindOfClass:[VNCoreMLFeatureValueObservation class]]) {
-                            VNCoreMLFeatureValueObservation *o = (VNCoreMLFeatureValueObservation *)result;
-                            if (o.featureValue.type == MLFeatureTypeMultiArray) {
-                                m2_consider_yolo_array(o.featureValue.multiArrayValue, w, h_px, &best_x, &best_y, &min_d);
-                            }
-                        } else {
-                            M2_LOG("[AI] 跳过未知 Vision 结果类型: %s", object_getClassName(result));
+                        CGRect b = o.boundingBox;
+                        // Vision 检测框是归一化坐标，原点在左下角。
+                        int tx = (b.origin.x + b.size.width / 2.0) * w;
+                        int ty = (1.0 - b.origin.y - b.size.height * (1.0 - AI_AIM_OFFSET)) * h_px;
+                        m2_consider_target(tx, ty, w, h_px, &best_x, &best_y, &min_d);
+                    } else if ([result isKindOfClass:[VNCoreMLFeatureValueObservation class]]) {
+                        VNCoreMLFeatureValueObservation *o = (VNCoreMLFeatureValueObservation *)result;
+                        if (o.featureValue.type == MLFeatureTypeMultiArray) {
+                            m2_consider_yolo_array(o.featureValue.multiArrayValue, w, h_px, &best_x, &best_y, &min_d);
                         }
-                    }
-                    if (best_x != -1) {
-                        char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", (float)(best_x-w/2), (float)(best_y-h_px/2));
-                        sendto(m2_udp_sock, m, (int)strlen(m), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
                     } else {
-                        sendto(m2_udp_sock, "{\"f\":0}", 7, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+                        M2_LOG("[AI] 跳过未知 Vision 结果类型: %s", object_getClassName(result));
                     }
-                } else if (requestError) {
-                    M2_LOG("[AI] Vision 推理失败: %s", requestError.localizedDescription.UTF8String);
+                }
+                if (best_x != -1) {
+                    char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", (float)(best_x-w/2), (float)(best_y-h_px/2));
+                    sendto(m2_udp_sock, m, (int)strlen(m), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+                } else {
                     sendto(m2_udp_sock, "{\"f\":0}", 7, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
                 }
             }
-        } @catch (NSException *exception) {
-            M2_LOG("[AI] 捕获异常，已跳过本帧: %s", exception.reason.UTF8String);
-            sendto(m2_udp_sock, "{\"f\":0}", 7, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
-        } @finally {
             CFRelease(pix);
-            atomic_store(&ai_is_busy, false);
         }
+        // AI 任务完成，解锁，允许接收下一帧
+        atomic_store(&ai_is_busy, false);
     });
 }
 
