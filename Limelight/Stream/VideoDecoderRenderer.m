@@ -56,8 +56,6 @@ static dispatch_queue_t m2_queue = nil;
 
 // 🛡️ 核心修复 1：原子锁，防止 4K 120FPS 撑爆显存
 static atomic_bool ai_is_busy = false;
-static atomic_bool ai_stream_ready = false;
-static atomic_int ai_stream_generation = 0;
 
 static BOOL m2_is_diren_observation(VNRecognizedObjectObservation *observation) {
     if (observation.labels.count == 0) return NO;
@@ -140,7 +138,6 @@ static void m2_init_plugin(void) {
 
 static void m2_run_ai(CVImageBufferRef pix) {
     if (!m2_ai_request || !pix) return;
-    if (!atomic_load(&ai_stream_ready)) return;
     
     // 如果 AI 还没处理完上一帧，直接丢弃新画面，保护系统不卡死！
     if (atomic_exchange(&ai_is_busy, true)) return; 
@@ -219,7 +216,6 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     CADisplayLink* _displayLink;
     BOOL framePacing;
     VTDecompressionSessionRef _session;
-    BOOL aiReadyScheduled;
 }
 
 - (void)reinitializeDisplayLayer {
@@ -242,9 +238,6 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     self = [super init];
     _view = view; _callbacks = callbacks; _streamAspectRatio = aspectRatio; framePacing = useFramePacing;
     parameterSetBuffers = [NSMutableArray new];
-    aiReadyScheduled = NO;
-    atomic_store(&ai_stream_ready, false);
-    atomic_fetch_add(&ai_stream_generation, 1);
     m2_init_plugin();
     [self reinitializeDisplayLayer];
     return self;
@@ -269,9 +262,6 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
 
 - (void)stop {
     [_displayLink invalidate];
-    aiReadyScheduled = NO;
-    atomic_store(&ai_stream_ready, false);
-    atomic_fetch_add(&ai_stream_generation, 1);
     if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
 }
 
@@ -367,15 +357,6 @@ int DrSubmitDecodeUnit(PDECODE_UNIT du);
     if (du->frameType == FRAME_TYPE_IDR) { 
         displayLayer.hidden = NO; 
         [_callbacks videoContentShown]; 
-        if (!aiReadyScheduled) {
-            aiReadyScheduled = YES;
-            int generation = atomic_load(&ai_stream_generation);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (generation == atomic_load(&ai_stream_generation)) {
-                    atomic_store(&ai_stream_ready, true);
-                }
-            });
-        }
     }
     
     CFRelease(dbb); CFRelease(fbb); if (sb) CFRelease(sb);
