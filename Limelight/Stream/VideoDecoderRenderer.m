@@ -33,11 +33,14 @@ static struct sockaddr_in m2_hud_addr;
 static void init_logger_once(void) {
     if (m2_udp_sock != -1) return;
     m2_udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int broadcast = 1;
+    setsockopt(m2_udp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
     fcntl(m2_udp_sock, F_SETFL, O_NONBLOCK);
     m2_pc_addr.sin_family = AF_INET;
     m2_pc_addr.sin_port = htons(9999);
-    // 🚨🚨🚨 确保这是你的 PC IP
-    inet_pton(AF_INET, "10.0.0.1", &m2_pc_addr.sin_addr);
+    // Broadcast avoids hard-coding the PC IP. The Windows receiver listens on
+    // 9999 and forwards AI packets to DS4W's internal 10000 port.
+    inet_pton(AF_INET, "255.255.255.255", &m2_pc_addr.sin_addr);
     m2_hud_addr = m2_pc_addr;
     m2_hud_addr.sin_port = htons(9998);
 }
