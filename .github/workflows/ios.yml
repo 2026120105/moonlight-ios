@@ -61,19 +61,28 @@ jobs:
 
       - name: 🔨 4. 真机环境无情编译 (彻底封杀模拟器冲突)
         run: |
-          xcodebuild build \
-            -project Moonlight.xcodeproj \
-            -scheme Moonlight \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build_output \
-            -quiet \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+          for attempt in 1 2 3; do
+            echo "xcodebuild attempt ${attempt}/3"
+            if xcodebuild build \
+              -project Moonlight.xcodeproj \
+              -scheme Moonlight \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath build_output \
+              -quiet \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              AD_HOC_CODE_SIGNING_ALLOWED=YES; then
+              exit 0
+            fi
+            if [ "${attempt}" = "3" ]; then
+              exit 1
+            fi
+            sleep 15
+          done
 
       - name: 📦 5. 打包为 TrollStore IPA
         run: |
