@@ -57,6 +57,7 @@ static VNCoreMLRequest *m2_ai_request = nil;
 static dispatch_queue_t m2_queue = nil;
 static CIContext *m2_ci_context = nil;
 static CFAbsoluteTime m2_last_hud_time = 0.0;
+static CFAbsoluteTime m2_attachment_scan_until = 0.0;
 
 typedef struct {
     CGFloat x;
@@ -84,8 +85,14 @@ static const M2HudRect M2_HAVOC_SCOPE = {1033, 674, 15, 11};
 static const M2HudRect M2_HAVOC_PAINTBALL = {1071, 674, 14, 11};
 
 @interface VideoDecoderRenderer ()
-- (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot;
+- (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot attachmentScan:(BOOL)attachmentScan;
 @end
+
+void M2NotifyApexMenuButton(BOOL pressed) {
+    if (pressed) {
+        m2_attachment_scan_until = CFAbsoluteTimeGetCurrent() + 2.0;
+    }
+}
 
 // 🛡️ 核心修复 1：原子锁，防止 4K 120FPS 撑爆显存
 static atomic_bool ai_is_busy = false;
@@ -243,10 +250,10 @@ static BOOL m2_uses_rifle_scope(NSString *weapon) {
 
 static NSDictionary *m2_empty_slot(NSString *weapon) {
     return @{@"weapon": m2_safe_string(weapon),
-             @"scope": @"S1x",
-             @"scopeColor": @"None",
-             @"barrel": @"None",
-             @"barrelColor": @"None"};
+             @"scope": @"Keep",
+             @"scopeColor": @"Skipped",
+             @"barrel": @"Keep",
+             @"barrelColor": @"Skipped"};
 }
 
 static NSDictionary *m2_detect_active_slot(CVImageBufferRef pix, NSString *weapon) {
@@ -294,12 +301,13 @@ static NSDictionary *m2_detect_active_slot(CVImageBufferRef pix, NSString *weapo
              @"barrelColor": barrelColor};
 }
 
-static void m2_send_hud_json(NSDictionary *slot1, NSDictionary *slot2, NSInteger active, CGFloat l1, CGFloat l2) {
+static void m2_send_hud_json(NSDictionary *slot, NSInteger active, CGFloat l1, CGFloat l2, BOOL attachmentScan) {
     NSString *json = [NSString stringWithFormat:
-        @"{\"type\":\"apex_hud\",\"active\":%ld,\"slot1\":{\"weapon\":\"%@\",\"scope\":\"%@\",\"scopeColor\":\"%@\",\"barrel\":\"%@\",\"barrelColor\":\"%@\"},\"slot2\":{\"weapon\":\"%@\",\"scope\":\"%@\",\"scopeColor\":\"%@\",\"barrel\":\"%@\",\"barrelColor\":\"%@\"},\"luma1\":%.1f,\"luma2\":%.1f}",
+        @"{\"type\":\"apex_hud\",\"mode\":\"%@\",\"active\":%ld,\"attachmentsValid\":%@,\"slot\":{\"weapon\":\"%@\",\"scope\":\"%@\",\"scopeColor\":\"%@\",\"barrel\":\"%@\",\"barrelColor\":\"%@\"},\"luma1\":%.1f,\"luma2\":%.1f}",
+        attachmentScan ? @"menu" : @"main",
         (long)active,
-        m2_json_escape(slot1[@"weapon"]), m2_json_escape(slot1[@"scope"]), m2_json_escape(slot1[@"scopeColor"]), m2_json_escape(slot1[@"barrel"]), m2_json_escape(slot1[@"barrelColor"]),
-        m2_json_escape(slot2[@"weapon"]), m2_json_escape(slot2[@"scope"]), m2_json_escape(slot2[@"scopeColor"]), m2_json_escape(slot2[@"barrel"]), m2_json_escape(slot2[@"barrelColor"]),
+        attachmentScan ? @"true" : @"false",
+        m2_json_escape(slot[@"weapon"]), m2_json_escape(slot[@"scope"]), m2_json_escape(slot[@"scopeColor"]), m2_json_escape(slot[@"barrel"]), m2_json_escape(slot[@"barrelColor"]),
         l1, l2];
     const char *payload = [json UTF8String];
     sendto(m2_udp_sock, payload, (int)strlen(payload), 0, (struct sockaddr *)&m2_hud_addr, sizeof(m2_hud_addr));
@@ -325,17 +333,18 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     if (bright2Image) CGImageRelease(bright2Image);
 
     NSInteger active = bright1.luma > bright2.luma ? 1 : 2;
-    NSDictionary *slot1 = active == 1 ? m2_detect_active_slot(pix, weapon1) : m2_empty_slot(weapon1);
-    NSDictionary *slot2 = active == 2 ? m2_detect_active_slot(pix, weapon2) : m2_empty_slot(weapon2);
-    m2_send_hud_json(slot1, slot2, active, bright1.luma, bright2.luma);
+    BOOL attachmentScan = now <= m2_attachment_scan_until;
+    NSString *activeWeapon = active == 1 ? weapon1 : weapon2;
+    NSDictionary *slot = attachmentScan ? m2_detect_active_slot(pix, activeWeapon) : m2_empty_slot(activeWeapon);
+    m2_send_hud_json(slot, active, bright1.luma, bright2.luma, attachmentScan);
 
-    NSString *text = [NSString stringWithFormat:@"HUD active=%ld L=%.0f/%.0f  1:%@ %@ %@/%@  2:%@ %@ %@/%@",
+    NSString *text = [NSString stringWithFormat:@"HUD %@ active=%ld L=%.0f/%.0f  %@ %@ %@/%@",
+                      attachmentScan ? @"MENU" : @"MAIN",
                       (long)active, bright1.luma, bright2.luma,
-                      slot1[@"weapon"], slot1[@"scope"], slot1[@"scopeColor"], slot1[@"barrelColor"],
-                      slot2[@"weapon"], slot2[@"scope"], slot2[@"scopeColor"], slot2[@"barrelColor"]];
+                      slot[@"weapon"], slot[@"scope"], slot[@"scopeColor"], slot[@"barrelColor"]];
     dispatch_async(dispatch_get_main_queue(), ^{
-        if ([renderer respondsToSelector:@selector(m2UpdateHudOverlayWithText:activeSlot:)]) {
-            [renderer m2UpdateHudOverlayWithText:text activeSlot:active];
+        if ([renderer respondsToSelector:@selector(m2UpdateHudOverlayWithText:activeSlot:attachmentScan:)]) {
+            [renderer m2UpdateHudOverlayWithText:text activeSlot:active attachmentScan:attachmentScan];
         }
     });
 }
@@ -447,7 +456,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     displayLayer.position = CGPointMake(CGRectGetMidX(_view.bounds), CGRectGetMidY(_view.bounds));
     displayLayer.bounds = CGRectMake(0, 0, vW, vH);
     [_view.layer addSublayer:displayLayer];
-    [self m2UpdateHudOverlayWithText:@"HUD waiting" activeSlot:1];
+    [self m2UpdateHudOverlayWithText:@"HUD waiting" activeSlot:1 attachmentScan:NO];
 
     if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
     if (formatDesc) { CFRelease(formatDesc); formatDesc = nil; }
@@ -497,7 +506,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     layer.hidden = NO;
 }
 
-- (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot {
+- (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot attachmentScan:(BOOL)attachmentScan {
     [self m2EnsureHudOverlay];
     if (!_m2HudOverlayLayer) return;
 
@@ -511,10 +520,16 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     [self m2SetHudRegion:1 rect:M2_SLOT2_NAME color:slot2Color];
     [self m2SetHudRegion:2 rect:M2_SLOT1_BRIGHT color:brightColor];
     [self m2SetHudRegion:3 rect:M2_SLOT2_BRIGHT color:brightColor];
-    [self m2SetHudRegion:4 rect:M2_RIFLE_BARREL color:rifleColor];
-    [self m2SetHudRegion:5 rect:M2_RIFLE_SCOPE color:rifleColor];
-    [self m2SetHudRegion:6 rect:M2_HAVOC_SCOPE color:havocColor];
-    [self m2SetHudRegion:7 rect:M2_HAVOC_PAINTBALL color:havocColor];
+    if (attachmentScan) {
+        [self m2SetHudRegion:4 rect:M2_RIFLE_BARREL color:rifleColor];
+        [self m2SetHudRegion:5 rect:M2_RIFLE_SCOPE color:rifleColor];
+        [self m2SetHudRegion:6 rect:M2_HAVOC_SCOPE color:havocColor];
+        [self m2SetHudRegion:7 rect:M2_HAVOC_PAINTBALL color:havocColor];
+    } else {
+        for (NSUInteger i = 4; i < _m2HudRegionLayers.count; i++) {
+            _m2HudRegionLayers[i].hidden = YES;
+        }
+    }
 
     CGFloat width = _m2HudOverlayLayer.bounds.size.width;
     _m2HudTextLayer.frame = CGRectMake(8, 8, MAX(200, width - 16), 22);

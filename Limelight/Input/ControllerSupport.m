@@ -17,6 +17,8 @@
 @import GameController;
 @import AudioToolbox;
 
+extern void M2NotifyApexMenuButton(BOOL pressed);
+
 static const double MOUSE_SPEED_DIVISOR = 1.25;
 
 @implementation ControllerSupport {
@@ -287,6 +289,11 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
 -(void) updateButtonFlags:(Controller*)controller flags:(int)flags
 {
     @synchronized(controller) {
+        BOOL oldMenuPressed = (controller.lastButtonFlags & PLAY_FLAG) != 0;
+        BOOL newMenuPressed = (flags & PLAY_FLAG) != 0;
+        if (!oldMenuPressed && newMenuPressed) {
+            M2NotifyApexMenuButton(YES);
+        }
         controller.lastButtonFlags = flags;
         
         // This must be called before handleSpecialCombosPressed
@@ -303,6 +310,9 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
 -(void) setButtonFlag:(Controller*)controller flags:(int)flags
 {
     @synchronized(controller) {
+        if ((flags & PLAY_FLAG) && !(controller.lastButtonFlags & PLAY_FLAG)) {
+            M2NotifyApexMenuButton(YES);
+        }
         controller.lastButtonFlags |= flags;
         [self handleSpecialCombosPressed:controller pressedButtons:flags];
     }
