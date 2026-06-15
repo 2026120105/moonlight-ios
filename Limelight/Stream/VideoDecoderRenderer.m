@@ -58,6 +58,7 @@ static dispatch_queue_t m2_queue = nil;
 static CIContext *m2_ci_context = nil;
 static CFAbsoluteTime m2_last_hud_time = 0.0;
 static CFAbsoluteTime m2_attachment_scan_until = 0.0;
+static NSString *m2_ai_debug_text = @"AI waiting";
 
 typedef struct {
     CGFloat x;
@@ -79,10 +80,12 @@ static const M2HudRect M2_SLOT1_NAME = {1023, 693, 83, 12};
 static const M2HudRect M2_SLOT2_NAME = {1133, 693, 69, 12};
 static const M2HudRect M2_SLOT1_BRIGHT = {1103, 693, 10, 9};
 static const M2HudRect M2_SLOT2_BRIGHT = {1131, 695, 12, 8};
-static const M2HudRect M2_RIFLE_BARREL = {1014, 673, 15, 14};
-static const M2HudRect M2_RIFLE_SCOPE = {1051, 673, 16, 14};
-static const M2HudRect M2_HAVOC_SCOPE = {1033, 674, 15, 11};
-static const M2HudRect M2_HAVOC_PAINTBALL = {1071, 674, 14, 11};
+static const M2HudRect M2_BACKPACK_LEFT_NAME = {438, 228, 164, 18};
+static const M2HudRect M2_BACKPACK_RIGHT_NAME = {804, 228, 103, 16};
+static const M2HudRect M2_BACKPACK_LEFT_BARREL = {441, 304, 40, 3};
+static const M2HudRect M2_BACKPACK_LEFT_SCOPE = {545, 304, 42, 3};
+static const M2HudRect M2_BACKPACK_RIGHT_BARREL = {807, 304, 41, 3};
+static const M2HudRect M2_BACKPACK_RIGHT_SCOPE = {911, 304, 41, 2};
 
 @interface VideoDecoderRenderer ()
 - (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot attachmentScan:(BOOL)attachmentScan;
@@ -171,9 +174,17 @@ static CGFloat m2_color_distance(M2HudColor c, CGFloat r, CGFloat g, CGFloat b) 
 }
 
 static NSString *m2_classify_equipment_color(M2HudColor c) {
-    CGFloat dWhite = MIN(m2_color_distance(c, 114, 109, 104), m2_color_distance(c, 110, 107, 102));
-    CGFloat dBlue = MIN(m2_color_distance(c, 79, 104, 139), m2_color_distance(c, 66, 100, 141));
-    CGFloat dPurple = MIN(m2_color_distance(c, 126, 104, 145), m2_color_distance(c, 129, 109, 148));
+    CGFloat dWhite = MIN(MIN(m2_color_distance(c, 114, 109, 104), m2_color_distance(c, 110, 107, 102)),
+                         m2_color_distance(c, 181, 190, 193));
+    CGFloat dBlue = MIN(MIN(m2_color_distance(c, 79, 104, 139), m2_color_distance(c, 66, 100, 141)),
+                        MIN(MIN(m2_color_distance(c, 25, 84, 136), m2_color_distance(c, 22, 103, 163)),
+                            MIN(MIN(m2_color_distance(c, 24, 110, 170), m2_color_distance(c, 34, 145, 206)),
+                                MIN(m2_color_distance(c, 45, 171, 233), m2_color_distance(c, 47, 173, 237)))));
+    CGFloat dPurple = MIN(MIN(MIN(m2_color_distance(c, 126, 104, 145), m2_color_distance(c, 129, 109, 148)),
+                              MIN(m2_color_distance(c, 74, 43, 100), m2_color_distance(c, 107, 80, 127))),
+                          MIN(m2_color_distance(c, 195, 116, 240), m2_color_distance(c, 171, 102, 215)));
+    CGFloat dNone = MIN(m2_color_distance(c, 36, 38, 37), m2_color_distance(c, 34, 37, 36));
+    if (dNone <= 30.0 || c.luma < 45.0) return @"None";
     CGFloat best = MIN(dWhite, MIN(dBlue, dPurple));
     if (best > 46.0) return @"None";
     if (dPurple <= dBlue && dPurple <= dWhite) return @"Purple";
@@ -221,6 +232,13 @@ static NSString *m2_normalize_weapon(NSString *raw) {
     NSString *s = [[raw lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     s = [s stringByReplacingOccurrencesOfString:@"-" withString:@""];
     if (s.length == 0) return @"None";
+    if ([s containsString:@"3"] && [s containsString:@"0"]) return @"R301";
+    if ([s containsString:@"45"]) return @"RE45";
+    if ([s containsString:@"c"] && [s containsString:@"a"]) return @"CAR";
+    if ([s containsString:@"仇"]) return @"Nemesis";
+    if ([s containsString:@"哈"] && [s containsString:@"克"]) return @"Havoc";
+    if ([s containsString:@"姆"]) return @"Flatline";
+    if ([s containsString:@"9"] && [s containsString:@"r"]) return @"R99";
     if ([s containsString:@"nemesis"] || [s containsString:@"复仇"]) return @"Nemesis";
     if ([s containsString:@"havoc"] || [s containsString:@"哈沃"]) return @"Havoc";
     if ([s containsString:@"r301"] || [s containsString:@"301"]) return @"R301";
@@ -256,7 +274,23 @@ static NSDictionary *m2_empty_slot(NSString *weapon) {
              @"barrelColor": @"Skipped"};
 }
 
-static NSDictionary *m2_detect_active_slot(CVImageBufferRef pix, NSString *weapon) {
+static M2HudRect m2_backpack_scope_rect(NSInteger active) {
+    return active == 2 ? M2_BACKPACK_RIGHT_SCOPE : M2_BACKPACK_LEFT_SCOPE;
+}
+
+static M2HudRect m2_backpack_barrel_rect(NSInteger active) {
+    return active == 2 ? M2_BACKPACK_RIGHT_BARREL : M2_BACKPACK_LEFT_BARREL;
+}
+
+static NSString *m2_backpack_weapon(CVImageBufferRef pix, NSInteger slot, NSString *fallback) {
+    M2HudRect nameRect = slot == 2 ? M2_BACKPACK_RIGHT_NAME : M2_BACKPACK_LEFT_NAME;
+    CGImageRef nameImage = m2_create_crop_image(pix, nameRect, 4.0);
+    NSString *weapon = m2_normalize_weapon(m2_ocr_text(nameImage));
+    if (nameImage) CGImageRelease(nameImage);
+    return [weapon isEqualToString:@"None"] ? fallback : weapon;
+}
+
+static NSDictionary *m2_detect_slot(CVImageBufferRef pix, NSString *weapon, NSInteger slot) {
     if (!weapon || [weapon isEqualToString:@"None"]) return m2_empty_slot(@"None");
 
     NSString *scope = @"S1x";
@@ -271,23 +305,23 @@ static NSDictionary *m2_detect_active_slot(CVImageBufferRef pix, NSString *weapo
             barrelColor = @"Locked";
         }
     } else if ([weapon isEqualToString:@"Havoc"]) {
-        CGImageRef scopeImage = m2_create_crop_image(pix, M2_HAVOC_SCOPE, 1.0);
+        CGImageRef scopeImage = m2_create_crop_image(pix, m2_backpack_scope_rect(slot), 1.0);
         scopeColor = m2_classify_equipment_color(m2_sample_color(scopeImage));
         if (scopeImage) CGImageRelease(scopeImage);
         scope = m2_scope_for_color(scopeColor);
 
-        CGImageRef paintImage = m2_create_crop_image(pix, M2_HAVOC_PAINTBALL, 1.0);
+        CGImageRef paintImage = m2_create_crop_image(pix, m2_backpack_barrel_rect(slot), 1.0);
         barrel = m2_classify_havoc_paintball(m2_sample_color(paintImage));
         if (paintImage) CGImageRelease(paintImage);
         barrelColor = [barrel isEqualToString:@"Paintball"] ? @"Active" : @"None";
     } else if (m2_uses_rifle_scope(weapon)) {
-        CGImageRef scopeImage = m2_create_crop_image(pix, M2_RIFLE_SCOPE, 1.0);
+        CGImageRef scopeImage = m2_create_crop_image(pix, m2_backpack_scope_rect(slot), 1.0);
         scopeColor = m2_classify_equipment_color(m2_sample_color(scopeImage));
         if (scopeImage) CGImageRelease(scopeImage);
         scope = m2_scope_for_color(scopeColor);
 
         if (m2_uses_rifle_barrel(weapon)) {
-            CGImageRef barrelImage = m2_create_crop_image(pix, M2_RIFLE_BARREL, 1.0);
+            CGImageRef barrelImage = m2_create_crop_image(pix, m2_backpack_barrel_rect(slot), 1.0);
             barrelColor = m2_classify_equipment_color(m2_sample_color(barrelImage));
             if (barrelImage) CGImageRelease(barrelImage);
             barrel = barrelColor;
@@ -301,14 +335,23 @@ static NSDictionary *m2_detect_active_slot(CVImageBufferRef pix, NSString *weapo
              @"barrelColor": barrelColor};
 }
 
-static void m2_send_hud_json(NSDictionary *slot, NSInteger active, CGFloat l1, CGFloat l2, BOOL attachmentScan) {
-    NSString *json = [NSString stringWithFormat:
-        @"{\"type\":\"apex_hud\",\"mode\":\"%@\",\"active\":%ld,\"attachmentsValid\":%@,\"slot\":{\"weapon\":\"%@\",\"scope\":\"%@\",\"scopeColor\":\"%@\",\"barrel\":\"%@\",\"barrelColor\":\"%@\"},\"luma1\":%.1f,\"luma2\":%.1f}",
-        attachmentScan ? @"menu" : @"main",
-        (long)active,
-        attachmentScan ? @"true" : @"false",
-        m2_json_escape(slot[@"weapon"]), m2_json_escape(slot[@"scope"]), m2_json_escape(slot[@"scopeColor"]), m2_json_escape(slot[@"barrel"]), m2_json_escape(slot[@"barrelColor"]),
-        l1, l2];
+static NSString *m2_slot_json(NSDictionary *slot) {
+    return [NSString stringWithFormat:@"{\"weapon\":\"%@\",\"scope\":\"%@\",\"scopeColor\":\"%@\",\"barrel\":\"%@\",\"barrelColor\":\"%@\"}",
+            m2_json_escape(slot[@"weapon"]), m2_json_escape(slot[@"scope"]), m2_json_escape(slot[@"scopeColor"]),
+            m2_json_escape(slot[@"barrel"]), m2_json_escape(slot[@"barrelColor"])];
+}
+
+static void m2_send_hud_json(NSDictionary *slot, NSDictionary *slot1, NSDictionary *slot2, NSInteger active, CGFloat l1, CGFloat l2, BOOL attachmentScan) {
+    NSString *json = nil;
+    if (attachmentScan) {
+        json = [NSString stringWithFormat:
+            @"{\"type\":\"apex_hud\",\"mode\":\"menu\",\"active\":%ld,\"attachmentsValid\":true,\"slot1\":%@,\"slot2\":%@,\"luma1\":%.1f,\"luma2\":%.1f}",
+            (long)active, m2_slot_json(slot1), m2_slot_json(slot2), l1, l2];
+    } else {
+        json = [NSString stringWithFormat:
+            @"{\"type\":\"apex_hud\",\"mode\":\"main\",\"active\":%ld,\"attachmentsValid\":false,\"slot\":%@,\"luma1\":%.1f,\"luma2\":%.1f}",
+            (long)active, m2_slot_json(slot), l1, l2];
+    }
     const char *payload = [json UTF8String];
     sendto(m2_udp_sock, payload, (int)strlen(payload), 0, (struct sockaddr *)&m2_hud_addr, sizeof(m2_hud_addr));
 }
@@ -335,13 +378,36 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     NSInteger active = bright1.luma > bright2.luma ? 1 : 2;
     BOOL attachmentScan = now <= m2_attachment_scan_until;
     NSString *activeWeapon = active == 1 ? weapon1 : weapon2;
-    NSDictionary *slot = attachmentScan ? m2_detect_active_slot(pix, activeWeapon) : m2_empty_slot(activeWeapon);
-    m2_send_hud_json(slot, active, bright1.luma, bright2.luma, attachmentScan);
+    NSDictionary *slot = nil;
+    NSDictionary *slot1 = nil;
+    NSDictionary *slot2 = nil;
+    if (attachmentScan) {
+        NSString *backpackWeapon1 = m2_backpack_weapon(pix, 1, weapon1);
+        NSString *backpackWeapon2 = m2_backpack_weapon(pix, 2, weapon2);
+        slot1 = m2_detect_slot(pix, backpackWeapon1, 1);
+        slot2 = m2_detect_slot(pix, backpackWeapon2, 2);
+        slot = active == 1 ? slot1 : slot2;
+    } else {
+        slot = m2_empty_slot(activeWeapon);
+    }
+    m2_send_hud_json(slot, slot1, slot2, active, bright1.luma, bright2.luma, attachmentScan);
 
-    NSString *text = [NSString stringWithFormat:@"HUD %@ active=%ld L=%.0f/%.0f  %@ %@ %@/%@",
-                      attachmentScan ? @"MENU" : @"MAIN",
+    NSString *regionText = attachmentScan
+        ? @"pos bag L name(438,228) brl(441,304) scp(545,304) | R name(804,228) brl(807,304) scp(911,304)"
+        : @"pos main n1(1023,693) n2(1133,693) b1(1103,693) b2(1131,695)";
+    NSString *resultText = nil;
+    if (attachmentScan) {
+        resultText = [NSString stringWithFormat:@"slot1 %@ %@/%@/%@  slot2 %@ %@/%@/%@",
+                      slot1[@"weapon"], slot1[@"scope"], slot1[@"scopeColor"], slot1[@"barrelColor"],
+                      slot2[@"weapon"], slot2[@"scope"], slot2[@"scopeColor"], slot2[@"barrelColor"]];
+    } else {
+        resultText = [NSString stringWithFormat:@"active=%ld L=%.0f/%.0f %@ %@/%@/%@",
                       (long)active, bright1.luma, bright2.luma,
                       slot[@"weapon"], slot[@"scope"], slot[@"scopeColor"], slot[@"barrelColor"]];
+    }
+    NSString *text = [NSString stringWithFormat:@"HUD %@ %@\n%@\n%@",
+                      attachmentScan ? @"MENU" : @"MAIN",
+                      regionText, resultText, m2_ai_debug_text ?: @"AI waiting"];
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([renderer respondsToSelector:@selector(m2UpdateHudOverlayWithText:activeSlot:attachmentScan:)]) {
             [renderer m2UpdateHudOverlayWithText:text activeSlot:active attachmentScan:attachmentScan];
@@ -389,6 +455,8 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
             if ([h performRequests:@[m2_ai_request] error:nil]) {
                 int w = (int)CVPixelBufferGetWidth(pix), h_px = (int)CVPixelBufferGetHeight(pix);
                 int best_x = -1, best_y = -1; float min_d = 1e10;
+                float best_conf = 0.0f;
+                NSString *best_label = @"unknown";
 
                 for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
                     // 读取顶部宏定义的阈值
@@ -399,13 +467,24 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         int ty = (1.0-b.origin.y-b.size.height*(1.0-AI_AIM_OFFSET))*h_px;
 
                         float d = pow(tx-w/2.0, 2) + pow(ty-h_px/2.0, 2);
-                        if (d < min_d) { min_d = d; best_x = tx; best_y = ty; }
+                        if (d < min_d) {
+                            min_d = d;
+                            best_x = tx;
+                            best_y = ty;
+                            best_conf = o.confidence;
+                            VNClassificationObservation *label = o.labels.firstObject;
+                            best_label = label.identifier ?: @"unknown";
+                        }
                     }
                 }
                 if (best_x != -1) {
-                    char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", (float)(best_x-w/2), (float)(best_y-h_px/2));
+                    float dx = (float)(best_x - w / 2);
+                    float dy = (float)(best_y - h_px / 2);
+                    m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f pos=%d,%d dx=%.0f dy=%.0f", best_label, best_conf, best_x, best_y, dx, dy];
+                    char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", dx, dy);
                     sendto(m2_udp_sock, m, (int)strlen(m), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
                 } else {
+                    m2_ai_debug_text = @"AI none";
                     sendto(m2_udp_sock, "{\"f\":0}", 7, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
                 }
             }
@@ -486,6 +565,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
         _m2HudTextLayer.contentsScale = [UIScreen mainScreen].scale;
         _m2HudTextLayer.fontSize = 12.0;
         _m2HudTextLayer.alignmentMode = kCAAlignmentLeft;
+        _m2HudTextLayer.wrapped = YES;
         _m2HudTextLayer.foregroundColor = [UIColor colorWithRed:1.0 green:0.95 blue:0.35 alpha:1.0].CGColor;
         _m2HudTextLayer.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55].CGColor;
         [_m2HudOverlayLayer addSublayer:_m2HudTextLayer];
@@ -513,18 +593,20 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     UIColor *slot1Color = activeSlot == 1 ? [UIColor colorWithRed:0.2 green:1.0 blue:0.35 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.75 blue:1.0 alpha:0.95];
     UIColor *slot2Color = activeSlot == 2 ? [UIColor colorWithRed:0.2 green:1.0 blue:0.35 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.75 blue:1.0 alpha:0.95];
     UIColor *brightColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.15 alpha:1.0];
-    UIColor *rifleColor = [UIColor colorWithRed:0.75 green:0.45 blue:1.0 alpha:1.0];
-    UIColor *havocColor = [UIColor colorWithRed:1.0 green:0.55 blue:0.25 alpha:1.0];
+    UIColor *activeAttachColor = [UIColor colorWithRed:0.75 green:0.45 blue:1.0 alpha:1.0];
+    UIColor *inactiveAttachColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.45 alpha:0.85];
 
     [self m2SetHudRegion:0 rect:M2_SLOT1_NAME color:slot1Color];
     [self m2SetHudRegion:1 rect:M2_SLOT2_NAME color:slot2Color];
     [self m2SetHudRegion:2 rect:M2_SLOT1_BRIGHT color:brightColor];
     [self m2SetHudRegion:3 rect:M2_SLOT2_BRIGHT color:brightColor];
     if (attachmentScan) {
-        [self m2SetHudRegion:4 rect:M2_RIFLE_BARREL color:rifleColor];
-        [self m2SetHudRegion:5 rect:M2_RIFLE_SCOPE color:rifleColor];
-        [self m2SetHudRegion:6 rect:M2_HAVOC_SCOPE color:havocColor];
-        [self m2SetHudRegion:7 rect:M2_HAVOC_PAINTBALL color:havocColor];
+        UIColor *leftAttachColor = activeSlot == 1 ? activeAttachColor : inactiveAttachColor;
+        UIColor *rightAttachColor = activeSlot == 2 ? activeAttachColor : inactiveAttachColor;
+        [self m2SetHudRegion:4 rect:M2_BACKPACK_LEFT_BARREL color:leftAttachColor];
+        [self m2SetHudRegion:5 rect:M2_BACKPACK_LEFT_SCOPE color:leftAttachColor];
+        [self m2SetHudRegion:6 rect:M2_BACKPACK_RIGHT_BARREL color:rightAttachColor];
+        [self m2SetHudRegion:7 rect:M2_BACKPACK_RIGHT_SCOPE color:rightAttachColor];
     } else {
         for (NSUInteger i = 4; i < _m2HudRegionLayers.count; i++) {
             _m2HudRegionLayers[i].hidden = YES;
@@ -532,7 +614,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     }
 
     CGFloat width = _m2HudOverlayLayer.bounds.size.width;
-    _m2HudTextLayer.frame = CGRectMake(8, 8, MAX(200, width - 16), 22);
+    _m2HudTextLayer.frame = CGRectMake(8, 8, MAX(200, width - 16), 64);
     _m2HudTextLayer.string = text ?: @"HUD waiting";
     _m2HudOverlayLayer.hidden = NO;
 }
