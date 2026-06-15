@@ -76,10 +76,9 @@ typedef struct {
 
 static const CGFloat M2_HUD_BASE_W = 1280.0;
 static const CGFloat M2_HUD_BASE_H = 720.0;
-static const M2HudRect M2_SLOT1_NAME = {1023, 693, 83, 12};
-static const M2HudRect M2_SLOT2_NAME = {1133, 693, 69, 12};
 static const M2HudRect M2_SLOT1_BRIGHT = {1103, 693, 10, 9};
 static const M2HudRect M2_SLOT2_BRIGHT = {1131, 695, 12, 8};
+static const M2HudRect M2_BACKPACK_MARKER = {186, 558, 78, 18};
 static const M2HudRect M2_BACKPACK_LEFT_NAME = {438, 228, 164, 18};
 static const M2HudRect M2_BACKPACK_RIGHT_NAME = {804, 228, 103, 16};
 static const M2HudRect M2_BACKPACK_LEFT_BARREL = {441, 304, 40, 3};
@@ -92,9 +91,7 @@ static const M2HudRect M2_BACKPACK_RIGHT_SCOPE = {911, 304, 41, 2};
 @end
 
 void M2NotifyApexMenuButton(BOOL pressed) {
-    if (pressed) {
-        m2_attachment_scan_until = CFAbsoluteTimeGetCurrent() + 2.0;
-    }
+    (void)pressed;
 }
 
 // 🛡️ 核心修复 1：原子锁，防止 4K 120FPS 撑爆显存
@@ -251,7 +248,7 @@ static NSString *m2_normalize_weapon(NSString *raw) {
     if ([s containsString:@"spitfire"] || [s containsString:@"喷火"]) return @"Spitfire";
     if ([s containsString:@"lstar"] || [s containsString:@"l-star"]) return @"LStar";
     if ([s containsString:@"devotion"] || [s containsString:@"专注"]) return @"Devotion";
-    return raw.length > 0 ? raw : @"None";
+    return @"None";
 }
 
 static BOOL m2_is_locked_1x_weapon(NSString *weapon) {
@@ -274,6 +271,16 @@ static NSDictionary *m2_empty_slot(NSString *weapon) {
              @"barrelColor": @"Skipped"};
 }
 
+static BOOL m2_backpack_marker_detected(CVImageBufferRef pix, NSString **rawTextOut) {
+    CGImageRef markerImage = m2_create_crop_image(pix, M2_BACKPACK_MARKER, 4.0);
+    NSString *raw = m2_ocr_text(markerImage);
+    if (markerImage) CGImageRelease(markerImage);
+    if (rawTextOut) *rawTextOut = raw ?: @"";
+
+    NSString *s = [[raw lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+    return [s containsString:@"平"] || [s containsString:@"ha"];
+}
+
 static M2HudRect m2_backpack_scope_rect(NSInteger active) {
     return active == 2 ? M2_BACKPACK_RIGHT_SCOPE : M2_BACKPACK_LEFT_SCOPE;
 }
@@ -291,7 +298,7 @@ static NSString *m2_backpack_weapon(CVImageBufferRef pix, NSInteger slot, NSStri
 }
 
 static NSDictionary *m2_detect_slot(CVImageBufferRef pix, NSString *weapon, NSInteger slot) {
-    if (!weapon || [weapon isEqualToString:@"None"]) return m2_empty_slot(@"None");
+    if (!weapon || [weapon isEqualToString:@"None"] || [weapon isEqualToString:@"Keep"]) return m2_empty_slot(weapon ?: @"Keep");
 
     NSString *scope = @"S1x";
     NSString *scopeColor = @"None";
@@ -361,13 +368,6 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     if (now - m2_last_hud_time < 0.20) return;
     m2_last_hud_time = now;
 
-    CGImageRef name1Image = m2_create_crop_image(pix, M2_SLOT1_NAME, 4.0);
-    CGImageRef name2Image = m2_create_crop_image(pix, M2_SLOT2_NAME, 4.0);
-    NSString *weapon1 = m2_normalize_weapon(m2_ocr_text(name1Image));
-    NSString *weapon2 = m2_normalize_weapon(m2_ocr_text(name2Image));
-    if (name1Image) CGImageRelease(name1Image);
-    if (name2Image) CGImageRelease(name2Image);
-
     CGImageRef bright1Image = m2_create_crop_image(pix, M2_SLOT1_BRIGHT, 1.0);
     CGImageRef bright2Image = m2_create_crop_image(pix, M2_SLOT2_BRIGHT, 1.0);
     M2HudColor bright1 = m2_sample_color(bright1Image);
@@ -376,33 +376,37 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     if (bright2Image) CGImageRelease(bright2Image);
 
     NSInteger active = bright1.luma > bright2.luma ? 1 : 2;
+    NSString *markerText = @"";
+    if (m2_backpack_marker_detected(pix, &markerText)) {
+        m2_attachment_scan_until = now + 0.3;
+    }
     BOOL attachmentScan = now <= m2_attachment_scan_until;
-    NSString *activeWeapon = active == 1 ? weapon1 : weapon2;
     NSDictionary *slot = nil;
     NSDictionary *slot1 = nil;
     NSDictionary *slot2 = nil;
     if (attachmentScan) {
-        NSString *backpackWeapon1 = m2_backpack_weapon(pix, 1, weapon1);
-        NSString *backpackWeapon2 = m2_backpack_weapon(pix, 2, weapon2);
+        NSString *backpackWeapon1 = m2_backpack_weapon(pix, 1, @"Keep");
+        NSString *backpackWeapon2 = m2_backpack_weapon(pix, 2, @"Keep");
         slot1 = m2_detect_slot(pix, backpackWeapon1, 1);
         slot2 = m2_detect_slot(pix, backpackWeapon2, 2);
         slot = active == 1 ? slot1 : slot2;
     } else {
-        slot = m2_empty_slot(activeWeapon);
+        slot = m2_empty_slot(@"Keep");
     }
     m2_send_hud_json(slot, slot1, slot2, active, bright1.luma, bright2.luma, attachmentScan);
 
     NSString *regionText = attachmentScan
-        ? @"pos bag L name(438,228) brl(441,304) scp(545,304) | R name(804,228) brl(807,304) scp(911,304)"
-        : @"pos main n1(1023,693) n2(1133,693) b1(1103,693) b2(1131,695)";
+        ? @"pos bag trig(186,558) L name(438,228) brl(441,304) scp(545,304) | R name(804,228) brl(807,304) scp(911,304)"
+        : @"pos main trig(186,558) b1(1103,693) b2(1131,695)";
     NSString *resultText = nil;
     if (attachmentScan) {
         resultText = [NSString stringWithFormat:@"slot1 %@ %@/%@/%@  slot2 %@ %@/%@/%@",
                       slot1[@"weapon"], slot1[@"scope"], slot1[@"scopeColor"], slot1[@"barrelColor"],
                       slot2[@"weapon"], slot2[@"scope"], slot2[@"scopeColor"], slot2[@"barrelColor"]];
     } else {
-        resultText = [NSString stringWithFormat:@"active=%ld L=%.0f/%.0f %@ %@/%@/%@",
+        resultText = [NSString stringWithFormat:@"active=%ld L=%.0f/%.0f marker='%@' %@ %@/%@/%@",
                       (long)active, bright1.luma, bright2.luma,
+                      markerText,
                       slot[@"weapon"], slot[@"scope"], slot[@"scopeColor"], slot[@"barrelColor"]];
     }
     NSString *text = [NSString stringWithFormat:@"HUD %@ %@\n%@\n%@",
@@ -590,25 +594,26 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     [self m2EnsureHudOverlay];
     if (!_m2HudOverlayLayer) return;
 
-    UIColor *slot1Color = activeSlot == 1 ? [UIColor colorWithRed:0.2 green:1.0 blue:0.35 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.75 blue:1.0 alpha:0.95];
-    UIColor *slot2Color = activeSlot == 2 ? [UIColor colorWithRed:0.2 green:1.0 blue:0.35 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.75 blue:1.0 alpha:0.95];
+    UIColor *triggerColor = [UIColor colorWithRed:0.95 green:0.95 blue:0.15 alpha:1.0];
     UIColor *brightColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.15 alpha:1.0];
     UIColor *activeAttachColor = [UIColor colorWithRed:0.75 green:0.45 blue:1.0 alpha:1.0];
     UIColor *inactiveAttachColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.45 alpha:0.85];
 
-    [self m2SetHudRegion:0 rect:M2_SLOT1_NAME color:slot1Color];
-    [self m2SetHudRegion:1 rect:M2_SLOT2_NAME color:slot2Color];
-    [self m2SetHudRegion:2 rect:M2_SLOT1_BRIGHT color:brightColor];
-    [self m2SetHudRegion:3 rect:M2_SLOT2_BRIGHT color:brightColor];
+    [self m2SetHudRegion:0 rect:M2_BACKPACK_MARKER color:triggerColor];
     if (attachmentScan) {
         UIColor *leftAttachColor = activeSlot == 1 ? activeAttachColor : inactiveAttachColor;
         UIColor *rightAttachColor = activeSlot == 2 ? activeAttachColor : inactiveAttachColor;
-        [self m2SetHudRegion:4 rect:M2_BACKPACK_LEFT_BARREL color:leftAttachColor];
-        [self m2SetHudRegion:5 rect:M2_BACKPACK_LEFT_SCOPE color:leftAttachColor];
-        [self m2SetHudRegion:6 rect:M2_BACKPACK_RIGHT_BARREL color:rightAttachColor];
-        [self m2SetHudRegion:7 rect:M2_BACKPACK_RIGHT_SCOPE color:rightAttachColor];
+        [self m2SetHudRegion:1 rect:M2_BACKPACK_LEFT_NAME color:leftAttachColor];
+        [self m2SetHudRegion:2 rect:M2_BACKPACK_RIGHT_NAME color:rightAttachColor];
+        [self m2SetHudRegion:3 rect:M2_BACKPACK_LEFT_BARREL color:leftAttachColor];
+        [self m2SetHudRegion:4 rect:M2_BACKPACK_LEFT_SCOPE color:leftAttachColor];
+        [self m2SetHudRegion:5 rect:M2_BACKPACK_RIGHT_BARREL color:rightAttachColor];
+        [self m2SetHudRegion:6 rect:M2_BACKPACK_RIGHT_SCOPE color:rightAttachColor];
+        _m2HudRegionLayers[7].hidden = YES;
     } else {
-        for (NSUInteger i = 4; i < _m2HudRegionLayers.count; i++) {
+        [self m2SetHudRegion:1 rect:M2_SLOT1_BRIGHT color:brightColor];
+        [self m2SetHudRegion:2 rect:M2_SLOT2_BRIGHT color:brightColor];
+        for (NSUInteger i = 3; i < _m2HudRegionLayers.count; i++) {
             _m2HudRegionLayers[i].hidden = YES;
         }
     }
