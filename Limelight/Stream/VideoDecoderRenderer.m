@@ -29,6 +29,9 @@
 static int m2_udp_sock = -1;
 static struct sockaddr_in m2_pc_addr;
 static struct sockaddr_in m2_hud_addr;
+static struct sockaddr_in m2_host_ai_addr;
+static struct sockaddr_in m2_host_hud_addr;
+static atomic_bool m2_has_host_addr = false;
 
 static void init_logger_once(void) {
     if (m2_udp_sock != -1) return;
@@ -45,6 +48,48 @@ static void init_logger_once(void) {
     m2_hud_addr.sin_port = htons(9998);
 }
 
+static void M2SetApexHost(NSString *host) {
+    if (!host || host.length == 0) {
+        atomic_store(&m2_has_host_addr, false);
+        return;
+    }
+
+    NSString *ipv4 = host;
+    NSRange colon = [ipv4 rangeOfString:@":"];
+    if (colon.location != NSNotFound) {
+        ipv4 = [ipv4 substringToIndex:colon.location];
+    }
+
+    struct sockaddr_in aiAddr;
+    memset(&aiAddr, 0, sizeof(aiAddr));
+    aiAddr.sin_family = AF_INET;
+    aiAddr.sin_port = htons(9999);
+    if (inet_pton(AF_INET, [ipv4 UTF8String], &aiAddr.sin_addr) == 1) {
+        m2_host_ai_addr = aiAddr;
+        m2_host_hud_addr = aiAddr;
+        m2_host_hud_addr.sin_port = htons(9998);
+        atomic_store(&m2_has_host_addr, true);
+    } else {
+        atomic_store(&m2_has_host_addr, false);
+    }
+}
+
+static void m2_send_ai_payload(const char *payload, int len) {
+    init_logger_once();
+    if (atomic_load(&m2_has_host_addr)) {
+        sendto(m2_udp_sock, payload, len, 0, (struct sockaddr *)&m2_host_ai_addr, sizeof(m2_host_ai_addr));
+    }
+    sendto(m2_udp_sock, payload, len, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+}
+
+static void m2_send_hud_payload(const char *payload, int len) {
+    init_logger_once();
+    if (atomic_load(&m2_has_host_addr)) {
+        sendto(m2_udp_sock, payload, len, 0, (struct sockaddr *)&m2_host_hud_addr, sizeof(m2_host_hud_addr));
+    }
+    sendto(m2_udp_sock, payload, len, 0, (struct sockaddr *)&m2_hud_addr, sizeof(m2_hud_addr));
+}
+
 static void M2_LOG(const char *format, ...) {
     init_logger_once();
     char buffer[512];
@@ -52,7 +97,7 @@ static void M2_LOG(const char *format, ...) {
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    sendto(m2_udp_sock, buffer, strlen(buffer), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+    m2_send_ai_payload(buffer, (int)strlen(buffer));
 }
 
 static VNCoreMLModel *m2_ai_model = nil;
@@ -363,7 +408,7 @@ static void m2_send_hud_json(NSDictionary *slot, NSDictionary *slot1, NSDictiona
             (long)active, m2_slot_json(slot), l1, l2];
     }
     const char *payload = [json UTF8String];
-    sendto(m2_udp_sock, payload, (int)strlen(payload), 0, (struct sockaddr *)&m2_hud_addr, sizeof(m2_hud_addr));
+    m2_send_hud_payload(payload, (int)strlen(payload));
 }
 
 static void m2_run_hud(CVImageBufferRef pix, id renderer) {
@@ -489,10 +534,10 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     float dy = (float)(best_y - h_px / 2);
                     m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f pos=%d,%d dx=%.0f dy=%.0f", best_label, best_conf, best_x, best_y, dx, dy];
                     char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", dx, dy);
-                    sendto(m2_udp_sock, m, (int)strlen(m), 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+                    m2_send_ai_payload(m, (int)strlen(m));
                 } else {
                     m2_ai_debug_text = @"AI none";
-                    sendto(m2_udp_sock, "{\"f\":0}", 7, 0, (struct sockaddr *)&m2_pc_addr, sizeof(m2_pc_addr));
+                    m2_send_ai_payload("{\"f\":0}", 7);
                 }
             }
             m2_run_hud(pix, renderer);
@@ -627,9 +672,10 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     _m2HudOverlayLayer.hidden = NO;
 }
 
-- (id)initWithView:(StreamView*)view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio useFramePacing:(BOOL)useFramePacing {
+- (id)initWithView:(StreamView*)view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio useFramePacing:(BOOL)useFramePacing host:(NSString*)host {
     self = [super init];
     _view = view; _callbacks = callbacks; _streamAspectRatio = aspectRatio; framePacing = useFramePacing;
+    M2SetApexHost(host);
     parameterSetBuffers = [NSMutableArray new];
     m2_init_plugin();
     [self reinitializeDisplayLayer];
