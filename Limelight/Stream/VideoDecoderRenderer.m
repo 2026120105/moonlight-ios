@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <stdatomic.h> // 引入原子锁机制
 
@@ -48,23 +49,60 @@ static void init_logger_once(void) {
     m2_hud_addr.sin_port = htons(9998);
 }
 
+static BOOL M2ResolveApexHost(NSString *host, struct in_addr *outAddr) {
+    if (!host || host.length == 0 || !outAddr) {
+        return NO;
+    }
+
+    NSString *name = [host stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (name.length == 0) {
+        return NO;
+    }
+
+    NSRange colon = [name rangeOfString:@":"];
+    if (colon.location != NSNotFound) {
+        name = [name substringToIndex:colon.location];
+    }
+
+    if (inet_pton(AF_INET, [name UTF8String], outAddr) == 1) {
+        return YES;
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    struct addrinfo *result = NULL;
+    int rc = getaddrinfo([name UTF8String], NULL, &hints, &result);
+    if (rc != 0 || !result) {
+        return NO;
+    }
+
+    BOOL resolved = NO;
+    for (struct addrinfo *item = result; item; item = item->ai_next) {
+        if (item->ai_family == AF_INET && item->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            struct sockaddr_in *addr = (struct sockaddr_in *)item->ai_addr;
+            *outAddr = addr->sin_addr;
+            resolved = YES;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+    return resolved;
+}
+
 static void M2SetApexHost(NSString *host) {
     if (!host || host.length == 0) {
         atomic_store(&m2_has_host_addr, false);
         return;
     }
 
-    NSString *ipv4 = host;
-    NSRange colon = [ipv4 rangeOfString:@":"];
-    if (colon.location != NSNotFound) {
-        ipv4 = [ipv4 substringToIndex:colon.location];
-    }
-
     struct sockaddr_in aiAddr;
     memset(&aiAddr, 0, sizeof(aiAddr));
     aiAddr.sin_family = AF_INET;
     aiAddr.sin_port = htons(9999);
-    if (inet_pton(AF_INET, [ipv4 UTF8String], &aiAddr.sin_addr) == 1) {
+    if (M2ResolveApexHost(host, &aiAddr.sin_addr)) {
         m2_host_ai_addr = aiAddr;
         m2_host_hud_addr = aiAddr;
         m2_host_hud_addr.sin_port = htons(9998);
