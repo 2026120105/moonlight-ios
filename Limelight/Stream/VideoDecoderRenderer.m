@@ -23,6 +23,9 @@
 #define AI_CONFIDENCE_THRESHOLD 0.28f
 // 瞄准点下压比例（0.20 = 框的中心往下 20%，瞄准胸口）
 #define AI_AIM_OFFSET 0.20f
+// 调试范围框保留显示，但框线外扩绘制，不压住实际取样/OCR 像素。
+#define M2_SHOW_HUD_REGION_BOXES 1
+#define M2_HUD_REGION_BOX_PADDING 4.0
 
 // ==========================================================
 // 📡 [M2 ANE] 异步纯旁路 AI 引擎 (满血防卡死版)
@@ -170,7 +173,11 @@ static const M2HudRect M2_BACKPACK_RIGHT_NAME = {804, 228, 103, 16};
 static const M2HudRect M2_BACKPACK_LEFT_BARREL = {441, 304, 40, 3};
 static const M2HudRect M2_BACKPACK_LEFT_SCOPE = {545, 304, 42, 3};
 static const M2HudRect M2_BACKPACK_RIGHT_BARREL = {807, 304, 41, 3};
-static const M2HudRect M2_BACKPACK_RIGHT_SCOPE = {911, 304, 41, 2};
+static const M2HudRect M2_BACKPACK_RIGHT_SCOPE = {911, 303, 42, 4};
+static const M2HudRect M2_BACKPACK_LEFT_HAVOC_SCOPE = {494, 304, 39, 2};
+static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_SCOPE = {860, 303, 39, 3};
+static const M2HudRect M2_BACKPACK_LEFT_HAVOC_PAINTBALL = {601, 308, 36, 3};
+static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_PAINTBALL = {967, 308, 36, 3};
 
 @interface VideoDecoderRenderer ()
 - (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot attachmentScan:(BOOL)attachmentScan;
@@ -275,16 +282,41 @@ static NSString *m2_classify_equipment_color(M2HudColor c) {
     return @"White";
 }
 
-static NSString *m2_scope_for_color(NSString *color) {
-    if ([color isEqualToString:@"Blue"] || [color isEqualToString:@"Purple"]) return @"S2x";
+static M2HudRect m2_scope_variant_rect(M2HudRect scopeRect) {
+    return (M2HudRect){scopeRect.x + 17, scopeRect.y - 27, 9, 2};
+}
+
+static NSString *m2_scope_for_color(CVImageBufferRef pix, NSString **colorRef, M2HudRect scopeRect) {
+    NSString *color = *colorRef ?: @"None";
     if ([color isEqualToString:@"White"]) return @"S1x";
-    return @"S1x";
+    if (![color isEqualToString:@"Blue"] && ![color isEqualToString:@"Purple"]) return @"S1x";
+
+    CGImageRef variantImage = m2_create_crop_image(pix, m2_scope_variant_rect(scopeRect), 1.0);
+    M2HudColor variantColor = m2_sample_color(variantImage);
+    if (variantImage) CGImageRelease(variantImage);
+
+    BOOL brightVariant = variantColor.luma > 70.0;
+    if ([color isEqualToString:@"Purple"]) {
+        if (brightVariant) {
+            *colorRef = @"PurpleVariable";
+            return @"S2x";
+        }
+        *colorRef = @"Purple3x";
+        return @"S3x";
+    }
+
+    if (brightVariant) {
+        *colorRef = @"BlueVariable";
+        return @"S1x";
+    }
+    *colorRef = @"Blue2x";
+    return @"S2x";
 }
 
 static NSString *m2_classify_havoc_paintball(M2HudColor c) {
-    CGFloat dActive = m2_color_distance(c, 157, 137, 104);
-    CGFloat dInactive = m2_color_distance(c, 141, 141, 132);
-    if (dActive < dInactive || (c.r - c.b >= 25.0 && c.r - c.g >= 8.0)) return @"Paintball";
+    CGFloat dActive = MIN(m2_color_distance(c, 157, 137, 104), m2_color_distance(c, 250, 201, 59));
+    CGFloat dInactive = MIN(m2_color_distance(c, 141, 141, 132), m2_color_distance(c, 191, 212, 213));
+    if (dActive < dInactive && (c.r - c.b >= 25.0 || c.r - c.g >= 25.0)) return @"Paintball";
     return @"None";
 }
 
@@ -375,6 +407,14 @@ static M2HudRect m2_backpack_barrel_rect(NSInteger active) {
     return active == 2 ? M2_BACKPACK_RIGHT_BARREL : M2_BACKPACK_LEFT_BARREL;
 }
 
+static M2HudRect m2_backpack_havoc_scope_rect(NSInteger active) {
+    return active == 2 ? M2_BACKPACK_RIGHT_HAVOC_SCOPE : M2_BACKPACK_LEFT_HAVOC_SCOPE;
+}
+
+static M2HudRect m2_backpack_havoc_paintball_rect(NSInteger active) {
+    return active == 2 ? M2_BACKPACK_RIGHT_HAVOC_PAINTBALL : M2_BACKPACK_LEFT_HAVOC_PAINTBALL;
+}
+
 static NSString *m2_backpack_weapon(CVImageBufferRef pix, NSInteger slot, NSString *fallback) {
     M2HudRect nameRect = slot == 2 ? M2_BACKPACK_RIGHT_NAME : M2_BACKPACK_LEFT_NAME;
     CGImageRef nameImage = m2_create_crop_image(pix, nameRect, 4.0);
@@ -398,20 +438,22 @@ static NSDictionary *m2_detect_slot(CVImageBufferRef pix, NSString *weapon, NSIn
             barrelColor = @"Locked";
         }
     } else if ([weapon isEqualToString:@"Havoc"]) {
-        CGImageRef scopeImage = m2_create_crop_image(pix, m2_backpack_scope_rect(slot), 1.0);
+        M2HudRect scopeRect = m2_backpack_havoc_scope_rect(slot);
+        CGImageRef scopeImage = m2_create_crop_image(pix, scopeRect, 1.0);
         scopeColor = m2_classify_equipment_color(m2_sample_color(scopeImage));
         if (scopeImage) CGImageRelease(scopeImage);
-        scope = m2_scope_for_color(scopeColor);
+        scope = m2_scope_for_color(pix, &scopeColor, scopeRect);
 
-        CGImageRef paintImage = m2_create_crop_image(pix, m2_backpack_barrel_rect(slot), 1.0);
+        CGImageRef paintImage = m2_create_crop_image(pix, m2_backpack_havoc_paintball_rect(slot), 1.0);
         barrel = m2_classify_havoc_paintball(m2_sample_color(paintImage));
         if (paintImage) CGImageRelease(paintImage);
         barrelColor = [barrel isEqualToString:@"Paintball"] ? @"Active" : @"None";
     } else if (m2_uses_rifle_scope(weapon)) {
-        CGImageRef scopeImage = m2_create_crop_image(pix, m2_backpack_scope_rect(slot), 1.0);
+        M2HudRect scopeRect = m2_backpack_scope_rect(slot);
+        CGImageRef scopeImage = m2_create_crop_image(pix, scopeRect, 1.0);
         scopeColor = m2_classify_equipment_color(m2_sample_color(scopeImage));
         if (scopeImage) CGImageRelease(scopeImage);
-        scope = m2_scope_for_color(scopeColor);
+        scope = m2_scope_for_color(pix, &scopeColor, scopeRect);
 
         if (m2_uses_rifle_barrel(weapon)) {
             CGImageRef barrelImage = m2_create_crop_image(pix, m2_backpack_barrel_rect(slot), 1.0);
@@ -482,7 +524,7 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     m2_send_hud_json(slot, slot1, slot2, active, bright1.luma, bright2.luma, attachmentScan);
 
     NSString *regionText = attachmentScan
-        ? @"pos bag trig(186,558) L name(438,228) brl(441,304) scp(545,304) | R name(804,228) brl(807,304) scp(911,304)"
+        ? @"pos bag trig(186,558) L name(438,228) brl(441,304) scp(545,304) var(+17,-27) havoc-scp(494,304) havoc-pb(601,308) | R name(804,228) brl(807,304) scp(911,303) var(928,276) havoc-scp(860,303) havoc-pb(967,308)"
         : @"pos main trig(186,558) b1(1103,693) b2(1131,695)";
     NSString *resultText = nil;
     if (attachmentScan) {
@@ -638,6 +680,14 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     return CGRectMake(rect.x * sx, rect.y * sy, MAX(1.0, rect.w * sx), MAX(1.0, rect.h * sy));
 }
 
+- (CGRect)m2OuterHintRectForHudRect:(M2HudRect)rect {
+    CGRect sampleRect = [self m2RectForHudRect:rect];
+    CGFloat padX = M2_HUD_REGION_BOX_PADDING * (_m2HudOverlayLayer.bounds.size.width / M2_HUD_BASE_W);
+    CGFloat padY = M2_HUD_REGION_BOX_PADDING * (_m2HudOverlayLayer.bounds.size.height / M2_HUD_BASE_H);
+    CGRect hintRect = CGRectInset(sampleRect, -MAX(2.0, padX), -MAX(2.0, padY));
+    return CGRectIntersection(hintRect, _m2HudOverlayLayer.bounds);
+}
+
 - (void)m2EnsureHudOverlay {
     if (!_view || !displayLayer) return;
     if (!_m2HudOverlayLayer) {
@@ -671,7 +721,11 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
 - (void)m2SetHudRegion:(NSUInteger)index rect:(M2HudRect)rect color:(UIColor *)color {
     if (index >= _m2HudRegionLayers.count) return;
     CALayer *layer = _m2HudRegionLayers[index];
-    layer.frame = [self m2RectForHudRect:rect];
+#if !M2_SHOW_HUD_REGION_BOXES
+    layer.hidden = YES;
+    return;
+#endif
+    layer.frame = [self m2OuterHintRectForHudRect:rect];
     layer.borderColor = color.CGColor;
     layer.hidden = NO;
 }
@@ -684,6 +738,12 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size, int
     UIColor *brightColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.15 alpha:1.0];
     UIColor *activeAttachColor = [UIColor colorWithRed:0.75 green:0.45 blue:1.0 alpha:1.0];
     UIColor *inactiveAttachColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.45 alpha:0.85];
+
+    if (!M2_SHOW_HUD_REGION_BOXES) {
+        for (CALayer *layer in _m2HudRegionLayers) {
+            layer.hidden = YES;
+        }
+    }
 
     [self m2SetHudRegion:0 rect:M2_BACKPACK_MARKER color:triggerColor];
     if (attachmentScan) {
