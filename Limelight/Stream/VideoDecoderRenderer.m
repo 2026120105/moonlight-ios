@@ -45,8 +45,8 @@ static void init_logger_once(void) {
     fcntl(m2_udp_sock, F_SETFL, O_NONBLOCK);
     m2_pc_addr.sin_family = AF_INET;
     m2_pc_addr.sin_port = htons(9999);
-    // Broadcast avoids hard-coding the PC IP. The Windows receiver listens on
-    // 9999 and forwards AI packets to DS4W's internal 10000 port.
+    // Compatibility mode: prefer the current Moonlight host address and keep
+    // broadcast as a fallback. No fixed 10.0.0.1 address or receiver is needed.
     inet_pton(AF_INET, "255.255.255.255", &m2_pc_addr.sin_addr);
     m2_hud_addr = m2_pc_addr;
     m2_hud_addr.sin_port = htons(9998);
