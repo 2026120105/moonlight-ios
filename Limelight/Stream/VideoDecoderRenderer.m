@@ -175,7 +175,7 @@ static const M2HudRect M2_BACKPACK_RIGHT_NAME = {804, 228, 103, 16};
 static const M2HudRect M2_BACKPACK_LEFT_BARREL = {441, 304, 40, 3};
 static const M2HudRect M2_BACKPACK_LEFT_SCOPE = {545, 304, 42, 3};
 static const M2HudRect M2_BACKPACK_RIGHT_BARREL = {807, 304, 41, 3};
-static const M2HudRect M2_BACKPACK_RIGHT_SCOPE = {911, 303, 42, 4};
+static const M2HudRect M2_BACKPACK_RIGHT_SCOPE = {911, 304, 42, 3};
 static const M2HudRect M2_BACKPACK_LEFT_HAVOC_SCOPE = {494, 304, 39, 2};
 static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_SCOPE = {860, 303, 39, 3};
 static const M2HudRect M2_BACKPACK_LEFT_HAVOC_PAINTBALL = {601, 308, 36, 3};
@@ -329,7 +329,7 @@ static NSString *m2_classify_havoc_paintball(M2HudColor c) {
 static NSString *m2_classify_devotion_paintball(M2HudColor c) {
     CGFloat dActive = MIN(m2_color_distance(c, 249, 201, 84), m2_color_distance(c, 255, 243, 101));
     CGFloat dInactive = MIN(m2_color_distance(c, 195, 212, 215), m2_color_distance(c, 191, 212, 213));
-    if (dActive < dInactive && c.r >= 220.0 && c.g >= 175.0 && c.b <= 145.0) return @"Active";
+    if (dActive <= dInactive + 30.0 && c.r >= 185.0 && c.g >= 140.0 && c.b <= 175.0) return @"Active";
     return @"Inactive";
 }
 
@@ -455,6 +455,12 @@ static NSDictionary *m2_detect_slot(CVImageBufferRef pix, NSString *weapon, NSIn
             barrel = @"Paintball";
             barrelColor = @"Locked";
         }
+    } else if ([weapon isEqualToString:@"LStar"]) {
+        M2HudRect scopeRect = m2_backpack_barrel_rect(slot);
+        CGImageRef scopeImage = m2_create_crop_image(pix, scopeRect, 1.0);
+        scopeColor = m2_classify_equipment_color(m2_sample_color(scopeImage));
+        if (scopeImage) CGImageRelease(scopeImage);
+        scope = m2_scope_for_color(pix, &scopeColor, scopeRect);
     } else if ([weapon isEqualToString:@"Havoc"]) {
         M2HudRect scopeRect = m2_backpack_havoc_scope_rect(slot);
         CGImageRef scopeImage = m2_create_crop_image(pix, scopeRect, 1.0);
