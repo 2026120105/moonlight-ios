@@ -45,8 +45,8 @@ static void init_logger_once(void) {
     fcntl(m2_udp_sock, F_SETFL, O_NONBLOCK);
     m2_pc_addr.sin_family = AF_INET;
     m2_pc_addr.sin_port = htons(9999);
-    // Compatibility mode: prefer the current Moonlight host address and keep
-    // broadcast as a fallback. No fixed 10.0.0.1 address or receiver is needed.
+    // Broadcast avoids hard-coding the PC IP. The Windows receiver listens on
+    // 9999 and forwards AI packets to DS4W's internal 10000 port.
     inet_pton(AF_INET, "255.255.255.255", &m2_pc_addr.sin_addr);
     m2_hud_addr = m2_pc_addr;
     m2_hud_addr.sin_port = htons(9998);
@@ -147,6 +147,8 @@ static dispatch_queue_t m2_queue = nil;
 static CIContext *m2_ci_context = nil;
 static CFAbsoluteTime m2_last_hud_time = 0.0;
 static CFAbsoluteTime m2_attachment_scan_until = 0.0;
+static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.20;
+static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 0.05;
 static NSString *m2_ai_debug_text = @"AI waiting";
 
 typedef struct {
@@ -406,8 +408,9 @@ static BOOL m2_backpack_marker_detected(CVImageBufferRef pix, NSString **rawText
     if (markerImage) CGImageRelease(markerImage);
     if (rawTextOut) *rawTextOut = raw ?: @"";
 
-    NSString *s = [[raw lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-    return [s containsString:@"平"] || [s containsString:@"ha"];
+    NSString *s = [[[raw lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""]
+                   stringByReplacingOccurrencesOfString:@"９" withString:@"9"];
+    return [s containsString:@"平"] || [s containsString:@"ha"] || [s containsString:@"99"];
 }
 
 static M2HudRect m2_backpack_scope_rect(NSInteger active) {
@@ -515,7 +518,8 @@ static void m2_send_hud_json(NSDictionary *slot, NSDictionary *slot1, NSDictiona
 
 static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - m2_last_hud_time < 0.20) return;
+    CFTimeInterval hudInterval = now <= m2_attachment_scan_until ? M2_HUD_ATTACHMENT_INTERVAL : M2_HUD_MAIN_INTERVAL;
+    if (now - m2_last_hud_time < hudInterval) return;
     m2_last_hud_time = now;
 
     CGImageRef bright1Image = m2_create_crop_image(pix, M2_SLOT1_BRIGHT, 1.0);
