@@ -180,8 +180,8 @@ static const M2HudRect M2_BACKPACK_LEFT_HAVOC_SCOPE = {494, 304, 39, 2};
 static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_SCOPE = {860, 303, 39, 3};
 static const M2HudRect M2_BACKPACK_LEFT_HAVOC_PAINTBALL = {601, 308, 36, 3};
 static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_PAINTBALL = {967, 308, 36, 3};
-static const M2HudRect M2_BACKPACK_LEFT_DEVOTION_PAINTBALL = {661, 310, 38, 3};
-static const M2HudRect M2_BACKPACK_RIGHT_DEVOTION_PAINTBALL = {1028, 310, 35, 2};
+static const M2HudRect M2_BACKPACK_LEFT_DEVOTION_PAINTBALL = {662, 308, 36, 3};
+static const M2HudRect M2_BACKPACK_RIGHT_DEVOTION_PAINTBALL = {1028, 308, 36, 3};
 
 @interface VideoDecoderRenderer ()
 - (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot attachmentScan:(BOOL)attachmentScan;
@@ -327,9 +327,9 @@ static NSString *m2_classify_havoc_paintball(M2HudColor c) {
 }
 
 static NSString *m2_classify_devotion_paintball(M2HudColor c) {
-    CGFloat dActive = MIN(m2_color_distance(c, 249, 201, 84), m2_color_distance(c, 255, 243, 101));
-    CGFloat dInactive = MIN(m2_color_distance(c, 195, 212, 215), m2_color_distance(c, 191, 212, 213));
-    if (dActive <= dInactive + 30.0 && c.r >= 185.0 && c.g >= 140.0 && c.b <= 175.0) return @"Active";
+    CGFloat dActive = MIN(m2_color_distance(c, 157, 137, 104), m2_color_distance(c, 250, 201, 59));
+    CGFloat dInactive = MIN(m2_color_distance(c, 141, 141, 132), m2_color_distance(c, 191, 212, 213));
+    if (dActive <= dInactive + 25.0 && c.luma >= 45.0 && (c.r - c.b >= 15.0 || c.r - c.g >= 15.0 || c.g - c.b >= 10.0)) return @"Active";
     return @"Inactive";
 }
 
