@@ -178,6 +178,8 @@ static const M2HudRect M2_BACKPACK_LEFT_HAVOC_SCOPE = {494, 304, 39, 2};
 static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_SCOPE = {860, 303, 39, 3};
 static const M2HudRect M2_BACKPACK_LEFT_HAVOC_PAINTBALL = {601, 308, 36, 3};
 static const M2HudRect M2_BACKPACK_RIGHT_HAVOC_PAINTBALL = {967, 308, 36, 3};
+static const M2HudRect M2_BACKPACK_LEFT_DEVOTION_PAINTBALL = {661, 310, 38, 3};
+static const M2HudRect M2_BACKPACK_RIGHT_DEVOTION_PAINTBALL = {1028, 310, 35, 2};
 
 @interface VideoDecoderRenderer ()
 - (void)m2UpdateHudOverlayWithText:(NSString *)text activeSlot:(NSInteger)activeSlot attachmentScan:(BOOL)attachmentScan;
@@ -264,6 +266,7 @@ static CGFloat m2_color_distance(M2HudColor c, CGFloat r, CGFloat g, CGFloat b) 
 }
 
 static NSString *m2_classify_equipment_color(M2HudColor c) {
+    CGFloat dGold = MIN(m2_color_distance(c, 255, 243, 101), m2_color_distance(c, 249, 201, 84));
     CGFloat dWhite = MIN(MIN(m2_color_distance(c, 114, 109, 104), m2_color_distance(c, 110, 107, 102)),
                          m2_color_distance(c, 181, 190, 193));
     CGFloat dBlue = MIN(MIN(m2_color_distance(c, 79, 104, 139), m2_color_distance(c, 66, 100, 141)),
@@ -275,6 +278,7 @@ static NSString *m2_classify_equipment_color(M2HudColor c) {
                           MIN(m2_color_distance(c, 195, 116, 240), m2_color_distance(c, 171, 102, 215)));
     CGFloat dNone = MIN(m2_color_distance(c, 36, 38, 37), m2_color_distance(c, 34, 37, 36));
     if (dNone <= 30.0 || c.luma < 45.0) return @"None";
+    if (dGold <= 42.0 && c.r >= 220.0 && c.g >= 180.0 && c.b <= 140.0) return @"Purple";
     CGFloat best = MIN(dWhite, MIN(dBlue, dPurple));
     if (best > 46.0) return @"None";
     if (dPurple <= dBlue && dPurple <= dWhite) return @"Purple";
@@ -318,6 +322,13 @@ static NSString *m2_classify_havoc_paintball(M2HudColor c) {
     CGFloat dInactive = MIN(m2_color_distance(c, 141, 141, 132), m2_color_distance(c, 191, 212, 213));
     if (dActive < dInactive && (c.r - c.b >= 25.0 || c.r - c.g >= 25.0)) return @"Paintball";
     return @"None";
+}
+
+static NSString *m2_classify_devotion_paintball(M2HudColor c) {
+    CGFloat dActive = MIN(m2_color_distance(c, 249, 201, 84), m2_color_distance(c, 255, 243, 101));
+    CGFloat dInactive = MIN(m2_color_distance(c, 195, 212, 215), m2_color_distance(c, 191, 212, 213));
+    if (dActive < dInactive && c.r >= 220.0 && c.g >= 175.0 && c.b <= 145.0) return @"Active";
+    return @"Inactive";
 }
 
 static NSString *m2_ocr_text(CGImageRef image) {
@@ -364,7 +375,7 @@ static NSString *m2_normalize_weapon(NSString *raw) {
     if ([s containsString:@"prowler"] || [s containsString:@"猎兽"]) return @"Prowler";
     if ([s containsString:@"re45"]) return @"RE45";
     if ([s containsString:@"spitfire"] || [s containsString:@"喷火"]) return @"Spitfire";
-    if ([s containsString:@"lstar"] || [s containsString:@"l-star"]) return @"LStar";
+    if ([s containsString:@"lstar"] || [s containsString:@"l-star"] || [s containsString:@"st"] || [s containsString:@"star"]) return @"LStar";
     if ([s containsString:@"devotion"] || [s containsString:@"专注"]) return @"Devotion";
     return @"None";
 }
@@ -374,11 +385,11 @@ static BOOL m2_is_locked_1x_weapon(NSString *weapon) {
 }
 
 static BOOL m2_uses_rifle_barrel(NSString *weapon) {
-    return [@[@"Nemesis", @"R301"] containsObject:weapon];
+    return [@[@"Nemesis", @"R301", @"Devotion"] containsObject:weapon];
 }
 
 static BOOL m2_uses_rifle_scope(NSString *weapon) {
-    return [@[@"Nemesis", @"R301", @"Flatline"] containsObject:weapon];
+    return [@[@"Nemesis", @"R301", @"Flatline", @"Devotion"] containsObject:weapon];
 }
 
 static NSDictionary *m2_empty_slot(NSString *weapon) {
@@ -413,6 +424,10 @@ static M2HudRect m2_backpack_havoc_scope_rect(NSInteger active) {
 
 static M2HudRect m2_backpack_havoc_paintball_rect(NSInteger active) {
     return active == 2 ? M2_BACKPACK_RIGHT_HAVOC_PAINTBALL : M2_BACKPACK_LEFT_HAVOC_PAINTBALL;
+}
+
+static M2HudRect m2_backpack_devotion_paintball_rect(NSInteger active) {
+    return active == 2 ? M2_BACKPACK_RIGHT_DEVOTION_PAINTBALL : M2_BACKPACK_LEFT_DEVOTION_PAINTBALL;
 }
 
 static NSString *m2_backpack_weapon(CVImageBufferRef pix, NSInteger slot, NSString *fallback) {
@@ -460,6 +475,13 @@ static NSDictionary *m2_detect_slot(CVImageBufferRef pix, NSString *weapon, NSIn
             barrelColor = m2_classify_equipment_color(m2_sample_color(barrelImage));
             if (barrelImage) CGImageRelease(barrelImage);
             barrel = barrelColor;
+        }
+
+        if ([weapon isEqualToString:@"Devotion"]) {
+            CGImageRef paintImage = m2_create_crop_image(pix, m2_backpack_devotion_paintball_rect(slot), 1.0);
+            NSString *paintballState = m2_classify_devotion_paintball(m2_sample_color(paintImage));
+            if (paintImage) CGImageRelease(paintImage);
+            barrelColor = paintballState;
         }
     }
 
