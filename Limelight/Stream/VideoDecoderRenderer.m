@@ -23,7 +23,6 @@
 // 降低阈值以提高灵敏度（原 0.45 -> 现 0.28）
 #define AI_LOCKED_CONFIDENCE_THRESHOLD 0.28f
 #define AI_NEW_CONFIDENCE_THRESHOLD 0.28f
-#define AI_IMMEDIATE_CONFIDENCE_THRESHOLD 0.45f
 // 瞄准点下压比例（0.20 = 框的中心往下 20%，瞄准胸口）
 #define AI_AIM_OFFSET 0.20f
 // 调试范围框保留显示，但框线外扩绘制，不压住实际取样/OCR 像素。
@@ -177,10 +176,6 @@ static CGFloat m2_ai_lock_y = 0.0;
 static CGFloat m2_ai_lock_bw = 0.0;
 static CGFloat m2_ai_lock_bh = 0.0;
 static int m2_ai_lock_misses = 0;
-static BOOL m2_ai_pending_valid = NO;
-static CGFloat m2_ai_pending_x = 0.0;
-static CGFloat m2_ai_pending_y = 0.0;
-static int m2_ai_pending_hits = 0;
 
 typedef struct {
     CGFloat x;
@@ -289,26 +284,6 @@ static BOOL m2_ai_should_use_full_frame_reacquire(void) {
 static CGFloat m2_ai_scaled_gate(CGFloat pixels, int w, int h) {
     CGFloat shortSide = MIN((CGFloat)w, (CGFloat)h);
     return pixels * (shortSide / M2_HUD_BASE_H);
-}
-
-static void m2_ai_clear_pending_target(void) {
-    m2_ai_pending_valid = NO;
-    m2_ai_pending_hits = 0;
-}
-
-static BOOL m2_ai_confirm_pending_target(CGFloat x, CGFloat y, float confidence, int w, int h) {
-    CGFloat gate = MAX(70.0, m2_ai_scaled_gate(120.0, w, h));
-    if (m2_ai_pending_valid && hypot(x - m2_ai_pending_x, y - m2_ai_pending_y) <= gate) {
-        m2_ai_pending_hits = MIN(m2_ai_pending_hits + 1, 100);
-    }
-    else {
-        m2_ai_pending_valid = YES;
-        m2_ai_pending_hits = 1;
-    }
-
-    m2_ai_pending_x = x;
-    m2_ai_pending_y = y;
-    return confidence >= AI_IMMEDIATE_CONFIDENCE_THRESHOLD || m2_ai_pending_hits >= 2;
 }
 
 static CGFloat m2_ai_alpha_for_cutoff(CGFloat cutoff, CGFloat dt) {
@@ -775,11 +750,15 @@ static void m2_init_plugin(void) {
 static void m2_run_ai(CVImageBufferRef pix, id renderer) {
     if (!pix) return;
 
-    m2_schedule_hud(pix, renderer);
-    if (!m2_ai_request) return;
+    if (!m2_ai_request) {
+        m2_schedule_hud(pix, renderer);
+        return;
+    }
 
     // 如果 AI 还没处理完上一帧，直接丢弃新画面，保护系统不卡死！
     if (atomic_exchange(&ai_is_busy, true)) return;
+
+    m2_schedule_hud(pix, renderer);
 
     CFRetain(pix);
     dispatch_async(m2_queue, ^{
@@ -864,7 +843,19 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     BOOL selectedFromLock = NO;
                     BOOL selectedSwitch = NO;
 
-                    if (locked_x != -1) {
+                    if (new_x != -1) {
+                        CGFloat switchDistance = m2_ai_lock_valid ? hypot((CGFloat)new_x - m2_ai_lock_x, (CGFloat)new_y - m2_ai_lock_y) : 0.0;
+                        best_x = new_x;
+                        best_y = new_y;
+                        best_conf = new_conf;
+                        best_bw = new_bw;
+                        best_bh = new_bh;
+                        best_label = new_label;
+                        best_source = @"new";
+                        targetSelected = YES;
+                        selectedSwitch = m2_ai_lock_valid && switchDistance > m2_ai_scaled_gate(70.0, w, h_px);
+                    }
+                    else if (locked_x != -1) {
                         best_x = locked_x;
                         best_y = locked_y;
                         best_conf = locked_conf;
@@ -874,25 +865,6 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         best_source = @"lock";
                         targetSelected = YES;
                         selectedFromLock = YES;
-                        m2_ai_clear_pending_target();
-                    }
-                    else if (new_x != -1) {
-                        m2_ai_track_center_valid = YES;
-                        m2_ai_track_center_x = (CGFloat)new_x;
-                        m2_ai_track_center_y = (CGFloat)new_y;
-                        BOOL acceptNewTarget = !m2_ai_lock_valid ||
-                            m2_ai_confirm_pending_target((CGFloat)new_x, (CGFloat)new_y, new_conf, w, h_px);
-                        if (acceptNewTarget) {
-                            best_x = new_x;
-                            best_y = new_y;
-                            best_conf = new_conf;
-                            best_bw = new_bw;
-                            best_bh = new_bh;
-                            best_label = new_label;
-                            best_source = !m2_ai_lock_valid ? @"new" : (new_conf >= AI_IMMEDIATE_CONFIDENCE_THRESHOLD ? @"new" : @"confirm");
-                            targetSelected = YES;
-                            selectedSwitch = m2_ai_lock_valid;
-                        }
                     }
 
                     if (targetSelected) {
@@ -936,7 +908,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                             m2_ai_track_center_valid = NO;
                         }
                         if (new_x != -1) {
-                            m2_ai_debug_text = [NSString stringWithFormat:@"AI cand %@ %.2f %@=%.0f hits=%d %.0fms", new_label, new_conf, aiMode, cropW, m2_ai_pending_hits, packetMs];
+                            m2_ai_debug_text = [NSString stringWithFormat:@"AI cand %@ %.2f %@=%.0f %.0fms", new_label, new_conf, aiMode, cropW, packetMs];
                         }
                         else {
                             m2_ai_debug_text = [NSString stringWithFormat:@"AI none %@=%.0f miss=%d %.0fms", aiMode, cropW, m2_ai_miss_streak, packetMs];
