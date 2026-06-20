@@ -701,6 +701,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     float locked_conf = 0.0f, new_conf = 0.0f;
                     float locked_bw = 0.0f, locked_bh = 0.0f;
                     float new_bw = 0.0f, new_bh = 0.0f;
+                    float locked_center_score = 1e10f;
                     NSString *locked_label = @"unknown";
                     NSString *new_label = @"unknown";
                     CGFloat lockGate = MAX(MAX(m2_ai_scaled_pixels(165.0, w, h_px), m2_ai_lock_bw * 3.0), 90.0);
@@ -726,6 +727,9 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                                         locked_conf = o.confidence;
                                         locked_bw = bw;
                                         locked_bh = bh;
+                                        CGFloat lockedCenterDx = (CGFloat)tx - w / 2.0;
+                                        CGFloat lockedCenterDy = (CGFloat)ty - h_px / 2.0;
+                                        locked_center_score = (float)(lockedCenterDx * lockedCenterDx + lockedCenterDy * lockedCenterDy);
                                         locked_label = candidateLabel;
                                     }
                                 }
@@ -758,8 +762,13 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     NSString *best_label = @"unknown";
                     NSString *best_source = @"none";
                     BOOL targetSelected = NO;
+                    CGFloat switchMargin = m2_ai_scaled_pixels(80.0, w, h_px);
+                    BOOL preferCenterCandidate = locked_x != -1 &&
+                                                 new_x != -1 &&
+                                                 new_conf >= AI_NEW_CONFIDENCE_THRESHOLD &&
+                                                 new_score + (float)(switchMargin * switchMargin) < locked_center_score;
 
-                    if (locked_x != -1) {
+                    if (locked_x != -1 && !preferCenterCandidate) {
                         best_x = locked_x;
                         best_y = locked_y;
                         best_conf = locked_conf;
@@ -777,7 +786,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         best_bw = new_bw;
                         best_bh = new_bh;
                         best_label = new_label;
-                        best_source = new_conf >= AI_NEW_CONFIDENCE_THRESHOLD ? @"new" : @"confirm";
+                        best_source = preferCenterCandidate ? @"switch" : (new_conf >= AI_NEW_CONFIDENCE_THRESHOLD ? @"new" : @"confirm");
                         targetSelected = YES;
                     }
 
