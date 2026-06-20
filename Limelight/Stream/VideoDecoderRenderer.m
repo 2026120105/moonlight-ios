@@ -815,6 +815,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                             m2_ai_debug_text = [NSString stringWithFormat:@"AI cand %@ %.2f %@=%.0f hits=%d %.0fms", new_label, new_conf, aiMode, cropW, m2_ai_pending_hits, packetMs];
                         }
                         else {
+                            m2_ai_clear_pending_target();
                             m2_ai_debug_text = [NSString stringWithFormat:@"AI none %@=%.0f miss=%d %.0fms", aiMode, cropW, m2_ai_miss_streak, packetMs];
                         }
                         m2_send_ai_payload("{\"f\":0}", 7);
@@ -825,6 +826,8 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
 
             if (!sentPayload) {
                 m2_ai_miss_streak = MIN(m2_ai_miss_streak + 1, 1000);
+                m2_ai_lock_valid = NO;
+                m2_ai_clear_pending_target();
                 m2_ai_debug_text = @"AI request failed";
                 m2_send_ai_payload("{\"f\":0}", 7);
             }
