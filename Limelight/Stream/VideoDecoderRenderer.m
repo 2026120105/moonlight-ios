@@ -21,7 +21,7 @@
 // ⚙️ 炼丹师专属调参区
 // ==========================================================
 // 降低阈值以提高灵敏度（原 0.45 -> 现 0.28）
-#define AI_LOCKED_CONFIDENCE_THRESHOLD 0.22f
+#define AI_LOCKED_CONFIDENCE_THRESHOLD 0.28f
 #define AI_NEW_CONFIDENCE_THRESHOLD 0.28f
 #define AI_IMMEDIATE_CONFIDENCE_THRESHOLD 0.45f
 // 瞄准点下压比例（0.20 = 框的中心往下 20%，瞄准胸口）
