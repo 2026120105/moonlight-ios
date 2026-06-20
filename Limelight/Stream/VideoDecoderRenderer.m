@@ -155,7 +155,7 @@ static CFAbsoluteTime m2_last_ai_sent_time = 0.0;
 static const CGFloat M2_AI_CROP_BASE_SIZE = 640.0;
 static const int M2_AI_FULL_FRAME_REACQUIRE_MISSES = 4;
 static const int M2_AI_FULL_FRAME_REACQUIRE_PERIOD = 6;
-static const int M2_AI_LOCK_HOLD_MISSES = 3;
+static const int M2_AI_LOCK_HOLD_MISSES = 2;
 static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.10;
 static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 1.0 / 30.0;
 static NSString *m2_ai_debug_text = @"AI waiting";
@@ -317,8 +317,21 @@ static CGFloat m2_ai_alpha_for_cutoff(CGFloat cutoff, CGFloat dt) {
     return 1.0 / (1.0 + tau / dt);
 }
 
-static CGPoint m2_ai_smooth_point(CGPoint raw, CFAbsoluteTime now, BOOL reset) {
+static CGPoint m2_ai_smooth_point(CGPoint raw, CFAbsoluteTime now, BOOL reset, int w, int h) {
     if (!m2_ai_filter_initialized || reset) {
+        m2_ai_filter_initialized = YES;
+        m2_ai_filtered_x = raw.x;
+        m2_ai_filtered_y = raw.y;
+        m2_ai_prev_raw_x = raw.x;
+        m2_ai_prev_raw_y = raw.y;
+        m2_ai_filtered_vx = 0.0;
+        m2_ai_filtered_vy = 0.0;
+        m2_ai_filter_last_time = now;
+        return raw;
+    }
+
+    CGFloat snapDistance = m2_ai_scaled_gate(70.0, w, h);
+    if (hypot(raw.x - m2_ai_filtered_x, raw.y - m2_ai_filtered_y) > snapDistance) {
         m2_ai_filter_initialized = YES;
         m2_ai_filtered_x = raw.x;
         m2_ai_filtered_y = raw.y;
@@ -337,12 +350,12 @@ static CGPoint m2_ai_smooth_point(CGPoint raw, CFAbsoluteTime now, BOOL reset) {
 
     CGFloat vx = (raw.x - m2_ai_prev_raw_x) / dt;
     CGFloat vy = (raw.y - m2_ai_prev_raw_y) / dt;
-    CGFloat dAlpha = m2_ai_alpha_for_cutoff(1.0, dt);
+    CGFloat dAlpha = m2_ai_alpha_for_cutoff(8.0, dt);
     m2_ai_filtered_vx += (vx - m2_ai_filtered_vx) * dAlpha;
     m2_ai_filtered_vy += (vy - m2_ai_filtered_vy) * dAlpha;
 
     CGFloat speed = hypot(m2_ai_filtered_vx, m2_ai_filtered_vy);
-    CGFloat cutoff = 5.0 + 0.018 * speed;
+    CGFloat cutoff = 28.0 + 0.035 * speed;
     CGFloat alpha = m2_ai_alpha_for_cutoff(cutoff, dt);
 
     m2_ai_filtered_x += (raw.x - m2_ai_filtered_x) * alpha;
@@ -848,6 +861,8 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     NSString *best_label = @"unknown";
                     NSString *best_source = @"none";
                     BOOL targetSelected = NO;
+                    BOOL selectedFromLock = NO;
+                    BOOL selectedSwitch = NO;
 
                     if (locked_x != -1) {
                         best_x = locked_x;
@@ -858,6 +873,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         best_label = locked_label;
                         best_source = @"lock";
                         targetSelected = YES;
+                        selectedFromLock = YES;
                         m2_ai_clear_pending_target();
                     }
                     else if (new_x != -1) {
@@ -875,12 +891,13 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                             best_label = new_label;
                             best_source = !m2_ai_lock_valid ? @"new" : (new_conf >= AI_IMMEDIATE_CONFIDENCE_THRESHOLD ? @"new" : @"confirm");
                             targetSelected = YES;
+                            selectedSwitch = m2_ai_lock_valid;
                         }
                     }
 
                     if (targetSelected) {
                         CGPoint rawPoint = CGPointMake((CGFloat)best_x, (CGFloat)best_y);
-                        CGPoint smoothPoint = m2_ai_smooth_point(rawPoint, sentNow, !m2_ai_lock_valid);
+                        CGPoint smoothPoint = m2_ai_smooth_point(rawPoint, sentNow, !m2_ai_lock_valid || selectedSwitch, w, h_px);
                         float rawDx = (float)(best_x - w / 2);
                         float rawDy = (float)(best_y - h_px / 2);
                         float dx = (float)(smoothPoint.x - w / 2.0);
@@ -895,7 +912,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         m2_ai_track_center_valid = YES;
                         m2_ai_track_center_x = rawPoint.x;
                         m2_ai_track_center_y = rawPoint.y;
-                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@ %@=%.0f size=%.0f raw=%.0f,%.0f sm=%.0f,%.0f %.0fms", best_label, best_conf, best_source, aiMode, cropW, best_bw, rawDx, rawDy, dx, dy, packetMs];
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@%@ %@=%.0f size=%.0f raw=%.0f,%.0f sm=%.0f,%.0f %.0fms", best_label, best_conf, best_source, selectedFromLock ? "" : (selectedSwitch ? "/reset" : ""), aiMode, cropW, best_bw, rawDx, rawDy, dx, dy, packetMs];
                         char m[160];
                         snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, best_bw, best_bw, best_bh);
                         m2_send_ai_payload(m, (int)strlen(m));
