@@ -822,8 +822,9 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                             }
 
                             if (o.confidence >= AI_NEW_CONFIDENCE_THRESHOLD) {
-                                CGFloat centerDist = hypot((CGFloat)tx - w / 2.0, (CGFloat)ty - h_px / 2.0);
-                                float score = (float)(centerDist - (CGFloat)o.confidence * m2_ai_scaled_gate(70.0, w, h_px));
+                                CGFloat centerDx = (CGFloat)tx - w / 2.0;
+                                CGFloat centerDy = (CGFloat)ty - h_px / 2.0;
+                                float score = (float)(centerDx * centerDx + centerDy * centerDy);
                                 if (score < new_score) {
                                     new_score = score;
                                     new_x = tx;
@@ -863,14 +864,16 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         m2_ai_track_center_valid = YES;
                         m2_ai_track_center_x = (CGFloat)new_x;
                         m2_ai_track_center_y = (CGFloat)new_y;
-                        if (m2_ai_confirm_pending_target((CGFloat)new_x, (CGFloat)new_y, new_conf, w, h_px)) {
+                        BOOL acceptNewTarget = !m2_ai_lock_valid ||
+                            m2_ai_confirm_pending_target((CGFloat)new_x, (CGFloat)new_y, new_conf, w, h_px);
+                        if (acceptNewTarget) {
                             best_x = new_x;
                             best_y = new_y;
                             best_conf = new_conf;
                             best_bw = new_bw;
                             best_bh = new_bh;
                             best_label = new_label;
-                            best_source = new_conf >= AI_IMMEDIATE_CONFIDENCE_THRESHOLD ? @"new" : @"confirm";
+                            best_source = !m2_ai_lock_valid ? @"new" : (new_conf >= AI_IMMEDIATE_CONFIDENCE_THRESHOLD ? @"new" : @"confirm");
                             targetSelected = YES;
                         }
                     }
