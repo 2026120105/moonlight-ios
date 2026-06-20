@@ -152,6 +152,7 @@ static CFAbsoluteTime m2_attachment_scan_until = 0.0;
 static CFAbsoluteTime m2_last_ai_sent_time = 0.0;
 static const CGFloat M2_AI_CROP_BASE_SIZE = 480.0;
 static const int M2_AI_FULL_FRAME_REACQUIRE_MISSES = 4;
+static const int M2_AI_FULL_FRAME_REACQUIRE_PERIOD = 6;
 static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.10;
 static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 1.0 / 30.0;
 static NSString *m2_ai_debug_text = @"AI waiting";
@@ -264,6 +265,12 @@ static CGRect m2_ai_tracking_crop_rect_for_buffer(CVImageBufferRef pix, BOOL *us
     CGFloat bottom = ph - (top + cropSize);
     if (usingTrack) *usingTrack = YES;
     return CGRectMake(floor(left), floor(bottom), cropSize, cropSize);
+}
+
+static BOOL m2_ai_should_use_full_frame_reacquire(void) {
+    if (m2_ai_miss_streak < M2_AI_FULL_FRAME_REACQUIRE_MISSES) return NO;
+    int missesSinceFirstReacquire = m2_ai_miss_streak - M2_AI_FULL_FRAME_REACQUIRE_MISSES;
+    return (missesSinceFirstReacquire % M2_AI_FULL_FRAME_REACQUIRE_PERIOD) == 0;
 }
 
 static CGFloat m2_ai_alpha_for_cutoff(CGFloat cutoff, CGFloat dt) {
@@ -729,7 +736,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
             BOOL sentPayload = NO;
             int w = (int)CVPixelBufferGetWidth(pix);
             int h_px = (int)CVPixelBufferGetHeight(pix);
-            BOOL useFullFrame = m2_ai_miss_streak >= M2_AI_FULL_FRAME_REACQUIRE_MISSES;
+            BOOL useFullFrame = m2_ai_should_use_full_frame_reacquire();
             BOOL useTrackedCrop = NO;
             CGRect cropRect = useFullFrame ? m2_ai_full_rect_for_buffer(pix) : m2_ai_tracking_crop_rect_for_buffer(pix, &useTrackedCrop);
             NSString *aiMode = useFullFrame ? @"full" : (useTrackedCrop ? @"track" : @"crop");
@@ -784,8 +791,8 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         float dy = (float)(smoothPoint.y - h_px / 2.0);
                         m2_ai_miss_streak = 0;
                         m2_ai_track_center_valid = YES;
-                        m2_ai_track_center_x = smoothPoint.x;
-                        m2_ai_track_center_y = smoothPoint.y;
+                        m2_ai_track_center_x = rawPoint.x;
+                        m2_ai_track_center_y = rawPoint.y;
                         m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@=%.0f size=%.0f raw=%.0f,%.0f sm=%.0f,%.0f %.0fms", best_label, best_conf, aiMode, cropW, best_bw, rawDx, rawDy, dx, dy, packetMs];
                         char m[160];
                         snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, best_bw, best_bw, best_bh);
