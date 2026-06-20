@@ -144,11 +144,14 @@ static void M2_LOG(const char *format, ...) {
 static VNCoreMLModel *m2_ai_model = nil;
 static VNCoreMLRequest *m2_ai_request = nil;
 static dispatch_queue_t m2_queue = nil;
+static dispatch_queue_t m2_hud_queue = nil;
 static CIContext *m2_ci_context = nil;
 static CFAbsoluteTime m2_last_hud_time = 0.0;
 static CFAbsoluteTime m2_attachment_scan_until = 0.0;
-static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.20;
-static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 0.05;
+static CFAbsoluteTime m2_last_ai_sent_time = 0.0;
+static const CGFloat M2_AI_CROP_BASE_SIZE = 480.0;
+static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.10;
+static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 1.0 / 30.0;
 static NSString *m2_ai_debug_text = @"AI waiting";
 
 typedef struct {
@@ -193,6 +196,7 @@ void M2NotifyApexMenuButton(BOOL pressed) {
 
 // 🛡️ 核心修复 1：原子锁，防止 4K 120FPS 撑爆显存
 static atomic_bool ai_is_busy = false;
+static atomic_bool hud_is_busy = false;
 
 static NSString *m2_safe_string(NSString *value) {
     return value ?: @"None";
@@ -211,6 +215,19 @@ static CGRect m2_scaled_rect_for_buffer(M2HudRect r, CVImageBufferRef pix) {
     CGFloat sx = pw / M2_HUD_BASE_W;
     CGFloat sy = ph / M2_HUD_BASE_H;
     return CGRectMake(r.x * sx, ph - ((r.y + r.h) * sy), r.w * sx, r.h * sy);
+}
+
+static CGRect m2_ai_crop_rect_for_buffer(CVImageBufferRef pix) {
+    CGFloat pw = (CGFloat)CVPixelBufferGetWidth(pix);
+    CGFloat ph = (CGFloat)CVPixelBufferGetHeight(pix);
+    if (pw <= 0.0 || ph <= 0.0) return CGRectZero;
+
+    CGFloat shortSide = MIN(pw, ph);
+    CGFloat cropSize = M2_AI_CROP_BASE_SIZE * (shortSide / M2_HUD_BASE_H);
+    cropSize = MIN(shortSide, MAX(1.0, cropSize));
+    CGFloat x = floor((pw - cropSize) * 0.5);
+    CGFloat y = floor((ph - cropSize) * 0.5);
+    return CGRectMake(x, y, cropSize, cropSize);
 }
 
 static CGImageRef m2_create_crop_image(CVImageBufferRef pix, M2HudRect r, CGFloat upscale) {
@@ -556,7 +573,7 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     m2_send_hud_json(slot, slot1, slot2, active, bright1.luma, bright2.luma, attachmentScan);
 
     NSString *regionText = attachmentScan
-        ? @"pos bag trig(186,558) L name(438,228) brl(441,304) scp(545,304) var(+17,-27) havoc-scp(494,304) havoc-pb(601,308) | R name(804,228) brl(807,304) scp(911,303) var(928,276) havoc-scp(860,303) havoc-pb(967,308)"
+        ? @"pos bag trig(186,558) L name(438,228) brl(441,304) scp(545,304) var(+17,-27) havoc-scp(494,304) havoc-pb(601,308) devo-pb(662,308) | R name(804,228) brl(807,304) scp(911,304) var(+17,-27) havoc-scp(860,303) havoc-pb(967,308) devo-pb(1028,308)"
         : @"pos main trig(186,558) b1(1103,693) b2(1131,695)";
     NSString *resultText = nil;
     if (attachmentScan) {
@@ -579,11 +596,27 @@ static void m2_run_hud(CVImageBufferRef pix, id renderer) {
     });
 }
 
+static void m2_schedule_hud(CVImageBufferRef pix, id renderer) {
+    if (!pix || !m2_hud_queue) return;
+    if (atomic_exchange(&hud_is_busy, true)) return;
+
+    CFRetain(pix);
+    dispatch_async(m2_hud_queue, ^{
+        @autoreleasepool {
+            m2_run_hud(pix, renderer);
+            CFRelease(pix);
+        }
+        atomic_store(&hud_is_busy, false);
+    });
+}
+
 static void m2_init_plugin(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         M2_LOG("[AI] 神经插件装载中...");
         m2_queue = dispatch_queue_create("com.m2.ai", DISPATCH_QUEUE_SERIAL);
+        m2_hud_queue = dispatch_queue_create("com.m2.hud", DISPATCH_QUEUE_SERIAL);
+        m2_ci_context = [CIContext contextWithOptions:nil];
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSURL *url = [[NSBundle mainBundle] URLForResource:@"best" withExtension:@"mlmodelc"];
             if (!url) { M2_LOG("[AI] ❌ 模型文件丢失！"); return; }
@@ -604,10 +637,9 @@ static void m2_init_plugin(void) {
 
 static void m2_run_ai(CVImageBufferRef pix, id renderer) {
     if (!pix) return;
-    if (!m2_ai_request) {
-        m2_run_hud(pix, renderer);
-        return;
-    }
+
+    m2_schedule_hud(pix, renderer);
+    if (!m2_ai_request) return;
 
     // 如果 AI 还没处理完上一帧，直接丢弃新画面，保护系统不卡死！
     if (atomic_exchange(&ai_is_busy, true)) return;
@@ -615,44 +647,71 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
     CFRetain(pix);
     dispatch_async(m2_queue, ^{
         @autoreleasepool {
-            VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:pix options:@{}];
-            if ([h performRequests:@[m2_ai_request] error:nil]) {
-                int w = (int)CVPixelBufferGetWidth(pix), h_px = (int)CVPixelBufferGetHeight(pix);
-                int best_x = -1, best_y = -1; float min_d = 1e10;
-                float best_conf = 0.0f;
-                NSString *best_label = @"unknown";
+            BOOL sentPayload = NO;
+            int w = (int)CVPixelBufferGetWidth(pix);
+            int h_px = (int)CVPixelBufferGetHeight(pix);
+            CGRect cropRect = m2_ai_crop_rect_for_buffer(pix);
 
-                for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
-                    // 读取顶部宏定义的阈值
-                    if (o.confidence > AI_CONFIDENCE_THRESHOLD) {
-                        CGRect b = o.boundingBox;
-                        // Vision 框架会自动帮我们把坐标还原回原图 (1080P/4K) 的比例
-                        int tx = (b.origin.x + b.size.width/2.0)*w;
-                        int ty = (1.0-b.origin.y-b.size.height*(1.0-AI_AIM_OFFSET))*h_px;
+            if (!CGRectIsEmpty(cropRect)) {
+                CIImage *source = [CIImage imageWithCVPixelBuffer:pix];
+                CIImage *cropped = [[source imageByCroppingToRect:cropRect] imageByApplyingTransform:CGAffineTransformMakeTranslation(-cropRect.origin.x, -cropRect.origin.y)];
+                VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCIImage:cropped options:@{}];
+                if ([handler performRequests:@[m2_ai_request] error:nil]) {
+                    CGFloat cropW = cropRect.size.width;
+                    CGFloat cropH = cropRect.size.height;
+                    CGFloat cropLeft = cropRect.origin.x;
+                    CGFloat cropTop = (CGFloat)h_px - (cropRect.origin.y + cropRect.size.height);
+                    int best_x = -1, best_y = -1;
+                    float min_d = 1e10;
+                    float best_conf = 0.0f;
+                    float best_bw = 0.0f;
+                    float best_bh = 0.0f;
+                    NSString *best_label = @"unknown";
 
-                        float d = pow(tx-w/2.0, 2) + pow(ty-h_px/2.0, 2);
-                        if (d < min_d) {
-                            min_d = d;
-                            best_x = tx;
-                            best_y = ty;
-                            best_conf = o.confidence;
-                            VNClassificationObservation *label = o.labels.firstObject;
-                            best_label = label.identifier ?: @"unknown";
+                    for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
+                        if (o.confidence > AI_CONFIDENCE_THRESHOLD) {
+                            CGRect b = o.boundingBox;
+                            int tx = (int)lrint(cropLeft + (b.origin.x + b.size.width / 2.0) * cropW);
+                            int ty = (int)lrint(cropTop + (1.0 - b.origin.y - b.size.height * (1.0 - AI_AIM_OFFSET)) * cropH);
+                            float bw = (float)(b.size.width * cropW);
+                            float bh = (float)(b.size.height * cropH);
+
+                            float d = pow(tx - w / 2.0, 2) + pow(ty - h_px / 2.0, 2);
+                            if (d < min_d) {
+                                min_d = d;
+                                best_x = tx;
+                                best_y = ty;
+                                best_conf = o.confidence;
+                                best_bw = bw;
+                                best_bh = bh;
+                                VNClassificationObservation *label = o.labels.firstObject;
+                                best_label = label.identifier ?: @"unknown";
+                            }
                         }
                     }
-                }
-                if (best_x != -1) {
-                    float dx = (float)(best_x - w / 2);
-                    float dy = (float)(best_y - h_px / 2);
-                    m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f pos=%d,%d dx=%.0f dy=%.0f", best_label, best_conf, best_x, best_y, dx, dy];
-                    char m[64]; snprintf(m, 64, "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f}", dx, dy);
-                    m2_send_ai_payload(m, (int)strlen(m));
-                } else {
-                    m2_ai_debug_text = @"AI none";
-                    m2_send_ai_payload("{\"f\":0}", 7);
+
+                    CFAbsoluteTime sentNow = CFAbsoluteTimeGetCurrent();
+                    double packetMs = m2_last_ai_sent_time > 0.0 ? (sentNow - m2_last_ai_sent_time) * 1000.0 : 0.0;
+                    m2_last_ai_sent_time = sentNow;
+                    if (best_x != -1) {
+                        float dx = (float)(best_x - w / 2);
+                        float dy = (float)(best_y - h_px / 2);
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f crop=%.0f size=%.0f pos=%d,%d dx=%.0f dy=%.0f %.0fms", best_label, best_conf, cropW, best_bw, best_x, best_y, dx, dy, packetMs];
+                        char m[128];
+                        snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, best_bw, best_bw, best_bh);
+                        m2_send_ai_payload(m, (int)strlen(m));
+                    } else {
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI none crop=%.0f %.0fms", cropW, packetMs];
+                        m2_send_ai_payload("{\"f\":0}", 7);
+                    }
+                    sentPayload = YES;
                 }
             }
-            m2_run_hud(pix, renderer);
+
+            if (!sentPayload) {
+                m2_ai_debug_text = @"AI request failed";
+                m2_send_ai_payload("{\"f\":0}", 7);
+            }
             CFRelease(pix);
         }
         // AI 任务完成，解锁，允许接收下一帧

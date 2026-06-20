@@ -438,6 +438,11 @@
                     message = @"The host PC reported a fatal video encoding error.\n\nTry disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution.";
                     break;
                     
+                case -1:
+                    title = @"Connection Terminated";
+                    message = @"The stream stopped with Moonlight's generic -1 failure code. This usually comes from a lower-level audio, video decoder, or connection callback. If it happens during Apex HUD/AI recognition, reduce recognition load or stream resolution and check the Moonlight log around the termination.";
+                    break;
+
                 default:
                 {
                     NSString* errorString;
