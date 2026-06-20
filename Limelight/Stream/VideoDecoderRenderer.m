@@ -154,7 +154,7 @@ static CFAbsoluteTime m2_last_ai_sent_time = 0.0;
 static const CGFloat M2_AI_CROP_BASE_SIZE = 640.0;
 static const int M2_AI_FULL_FRAME_REACQUIRE_MISSES = 4;
 static const int M2_AI_FULL_FRAME_REACQUIRE_PERIOD = 6;
-static const int M2_AI_LOCK_HOLD_MISSES = 2;
+static const int M2_AI_LOCK_HOLD_MISSES = 0;
 static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.10;
 static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 1.0 / 30.0;
 static NSString *m2_ai_debug_text = @"AI waiting";
@@ -869,11 +869,10 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
 
                     if (targetSelected) {
                         CGPoint rawPoint = CGPointMake((CGFloat)best_x, (CGFloat)best_y);
-                        CGPoint smoothPoint = m2_ai_smooth_point(rawPoint, sentNow, !m2_ai_lock_valid || selectedSwitch, w, h_px);
                         float rawDx = (float)(best_x - w / 2);
                         float rawDy = (float)(best_y - h_px / 2);
-                        float dx = (float)(smoothPoint.x - w / 2.0);
-                        float dy = (float)(smoothPoint.y - h_px / 2.0);
+                        float dx = rawDx;
+                        float dy = rawDy;
                         m2_ai_miss_streak = 0;
                         m2_ai_lock_valid = YES;
                         m2_ai_lock_misses = 0;
@@ -884,7 +883,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                         m2_ai_track_center_valid = YES;
                         m2_ai_track_center_x = rawPoint.x;
                         m2_ai_track_center_y = rawPoint.y;
-                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@%@ %@=%.0f size=%.0f raw=%.0f,%.0f sm=%.0f,%.0f %.0fms", best_label, best_conf, best_source, selectedFromLock ? "" : (selectedSwitch ? "/reset" : ""), aiMode, cropW, best_bw, rawDx, rawDy, dx, dy, packetMs];
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@%@ %@=%.0f size=%.0f rawout=%.0f,%.0f %.0fms", best_label, best_conf, best_source, selectedFromLock ? "" : (selectedSwitch ? "/reset" : ""), aiMode, cropW, best_bw, dx, dy, packetMs];
                         char m[160];
                         snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, best_bw, best_bw, best_bh);
                         m2_send_ai_payload(m, (int)strlen(m));
