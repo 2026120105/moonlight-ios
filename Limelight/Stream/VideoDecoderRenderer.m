@@ -14,6 +14,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdatomic.h> // 引入原子锁机制
 
 // ==========================================================
@@ -150,9 +151,22 @@ static CFAbsoluteTime m2_last_hud_time = 0.0;
 static CFAbsoluteTime m2_attachment_scan_until = 0.0;
 static CFAbsoluteTime m2_last_ai_sent_time = 0.0;
 static const CGFloat M2_AI_CROP_BASE_SIZE = 480.0;
+static const int M2_AI_FULL_FRAME_REACQUIRE_MISSES = 4;
 static const CFTimeInterval M2_HUD_MAIN_INTERVAL = 0.10;
 static const CFTimeInterval M2_HUD_ATTACHMENT_INTERVAL = 1.0 / 30.0;
 static NSString *m2_ai_debug_text = @"AI waiting";
+static int m2_ai_miss_streak = 0;
+static BOOL m2_ai_filter_initialized = NO;
+static CGFloat m2_ai_filtered_x = 0.0;
+static CGFloat m2_ai_filtered_y = 0.0;
+static CGFloat m2_ai_prev_raw_x = 0.0;
+static CGFloat m2_ai_prev_raw_y = 0.0;
+static CGFloat m2_ai_filtered_vx = 0.0;
+static CGFloat m2_ai_filtered_vy = 0.0;
+static CFAbsoluteTime m2_ai_filter_last_time = 0.0;
+static BOOL m2_ai_track_center_valid = NO;
+static CGFloat m2_ai_track_center_x = 0.0;
+static CGFloat m2_ai_track_center_y = 0.0;
 
 typedef struct {
     CGFloat x;
@@ -228,6 +242,71 @@ static CGRect m2_ai_crop_rect_for_buffer(CVImageBufferRef pix) {
     CGFloat x = floor((pw - cropSize) * 0.5);
     CGFloat y = floor((ph - cropSize) * 0.5);
     return CGRectMake(x, y, cropSize, cropSize);
+}
+
+static CGRect m2_ai_full_rect_for_buffer(CVImageBufferRef pix) {
+    CGFloat pw = (CGFloat)CVPixelBufferGetWidth(pix);
+    CGFloat ph = (CGFloat)CVPixelBufferGetHeight(pix);
+    if (pw <= 0.0 || ph <= 0.0) return CGRectZero;
+    return CGRectMake(0.0, 0.0, pw, ph);
+}
+
+static CGRect m2_ai_tracking_crop_rect_for_buffer(CVImageBufferRef pix, BOOL *usingTrack) {
+    CGRect centerCrop = m2_ai_crop_rect_for_buffer(pix);
+    if (usingTrack) *usingTrack = NO;
+    if (CGRectIsEmpty(centerCrop) || !m2_ai_track_center_valid) return centerCrop;
+
+    CGFloat pw = (CGFloat)CVPixelBufferGetWidth(pix);
+    CGFloat ph = (CGFloat)CVPixelBufferGetHeight(pix);
+    CGFloat cropSize = centerCrop.size.width;
+    CGFloat left = MIN(MAX(0.0, m2_ai_track_center_x - cropSize * 0.5), MAX(0.0, pw - cropSize));
+    CGFloat top = MIN(MAX(0.0, m2_ai_track_center_y - cropSize * 0.5), MAX(0.0, ph - cropSize));
+    CGFloat bottom = ph - (top + cropSize);
+    if (usingTrack) *usingTrack = YES;
+    return CGRectMake(floor(left), floor(bottom), cropSize, cropSize);
+}
+
+static CGFloat m2_ai_alpha_for_cutoff(CGFloat cutoff, CGFloat dt) {
+    if (dt <= 0.0) return 1.0;
+    CGFloat tau = 1.0 / (2.0 * 3.14159265358979323846 * MAX(0.001, cutoff));
+    return 1.0 / (1.0 + tau / dt);
+}
+
+static CGPoint m2_ai_smooth_point(CGPoint raw, CFAbsoluteTime now, BOOL reset) {
+    if (!m2_ai_filter_initialized || reset) {
+        m2_ai_filter_initialized = YES;
+        m2_ai_filtered_x = raw.x;
+        m2_ai_filtered_y = raw.y;
+        m2_ai_prev_raw_x = raw.x;
+        m2_ai_prev_raw_y = raw.y;
+        m2_ai_filtered_vx = 0.0;
+        m2_ai_filtered_vy = 0.0;
+        m2_ai_filter_last_time = now;
+        return raw;
+    }
+
+    CGFloat dt = (CGFloat)(now - m2_ai_filter_last_time);
+    if (dt < 1.0 / 240.0 || dt > 1.0 / 12.0) {
+        dt = 1.0 / 60.0;
+    }
+
+    CGFloat vx = (raw.x - m2_ai_prev_raw_x) / dt;
+    CGFloat vy = (raw.y - m2_ai_prev_raw_y) / dt;
+    CGFloat dAlpha = m2_ai_alpha_for_cutoff(1.0, dt);
+    m2_ai_filtered_vx += (vx - m2_ai_filtered_vx) * dAlpha;
+    m2_ai_filtered_vy += (vy - m2_ai_filtered_vy) * dAlpha;
+
+    CGFloat speed = hypot(m2_ai_filtered_vx, m2_ai_filtered_vy);
+    CGFloat cutoff = 5.0 + 0.018 * speed;
+    CGFloat alpha = m2_ai_alpha_for_cutoff(cutoff, dt);
+
+    m2_ai_filtered_x += (raw.x - m2_ai_filtered_x) * alpha;
+    m2_ai_filtered_y += (raw.y - m2_ai_filtered_y) * alpha;
+    m2_ai_prev_raw_x = raw.x;
+    m2_ai_prev_raw_y = raw.y;
+    m2_ai_filter_last_time = now;
+
+    return CGPointMake(m2_ai_filtered_x, m2_ai_filtered_y);
 }
 
 static CGImageRef m2_create_crop_image(CVImageBufferRef pix, M2HudRect r, CGFloat upscale) {
@@ -650,7 +729,10 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
             BOOL sentPayload = NO;
             int w = (int)CVPixelBufferGetWidth(pix);
             int h_px = (int)CVPixelBufferGetHeight(pix);
-            CGRect cropRect = m2_ai_crop_rect_for_buffer(pix);
+            BOOL useFullFrame = m2_ai_miss_streak >= M2_AI_FULL_FRAME_REACQUIRE_MISSES;
+            BOOL useTrackedCrop = NO;
+            CGRect cropRect = useFullFrame ? m2_ai_full_rect_for_buffer(pix) : m2_ai_tracking_crop_rect_for_buffer(pix, &useTrackedCrop);
+            NSString *aiMode = useFullFrame ? @"full" : (useTrackedCrop ? @"track" : @"crop");
 
             if (!CGRectIsEmpty(cropRect)) {
                 CIImage *source = [CIImage imageWithCVPixelBuffer:pix];
@@ -694,14 +776,27 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     double packetMs = m2_last_ai_sent_time > 0.0 ? (sentNow - m2_last_ai_sent_time) * 1000.0 : 0.0;
                     m2_last_ai_sent_time = sentNow;
                     if (best_x != -1) {
-                        float dx = (float)(best_x - w / 2);
-                        float dy = (float)(best_y - h_px / 2);
-                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f crop=%.0f size=%.0f pos=%d,%d dx=%.0f dy=%.0f %.0fms", best_label, best_conf, cropW, best_bw, best_x, best_y, dx, dy, packetMs];
-                        char m[128];
+                        CGPoint rawPoint = CGPointMake((CGFloat)best_x, (CGFloat)best_y);
+                        CGPoint smoothPoint = m2_ai_smooth_point(rawPoint, sentNow, useFullFrame);
+                        float rawDx = (float)(best_x - w / 2);
+                        float rawDy = (float)(best_y - h_px / 2);
+                        float dx = (float)(smoothPoint.x - w / 2.0);
+                        float dy = (float)(smoothPoint.y - h_px / 2.0);
+                        m2_ai_miss_streak = 0;
+                        m2_ai_track_center_valid = YES;
+                        m2_ai_track_center_x = smoothPoint.x;
+                        m2_ai_track_center_y = smoothPoint.y;
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@=%.0f size=%.0f raw=%.0f,%.0f sm=%.0f,%.0f %.0fms", best_label, best_conf, aiMode, cropW, best_bw, rawDx, rawDy, dx, dy, packetMs];
+                        char m[160];
                         snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, best_bw, best_bw, best_bh);
                         m2_send_ai_payload(m, (int)strlen(m));
                     } else {
-                        m2_ai_debug_text = [NSString stringWithFormat:@"AI none crop=%.0f %.0fms", cropW, packetMs];
+                        m2_ai_miss_streak = MIN(m2_ai_miss_streak + 1, 1000);
+                        if (m2_ai_miss_streak > M2_AI_FULL_FRAME_REACQUIRE_MISSES * 3) {
+                            m2_ai_filter_initialized = NO;
+                            m2_ai_track_center_valid = NO;
+                        }
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI none %@=%.0f miss=%d %.0fms", aiMode, cropW, m2_ai_miss_streak, packetMs];
                         m2_send_ai_payload("{\"f\":0}", 7);
                     }
                     sentPayload = YES;
@@ -709,6 +804,11 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
             }
 
             if (!sentPayload) {
+                m2_ai_miss_streak = MIN(m2_ai_miss_streak + 1, 1000);
+                if (m2_ai_miss_streak > M2_AI_FULL_FRAME_REACQUIRE_MISSES * 3) {
+                    m2_ai_filter_initialized = NO;
+                    m2_ai_track_center_valid = NO;
+                }
                 m2_ai_debug_text = @"AI request failed";
                 m2_send_ai_payload("{\"f\":0}", 7);
             }
