@@ -163,6 +163,12 @@ static CGFloat m2_ai_lock_y = 0.0;
 static CGFloat m2_ai_lock_bw = 0.0;
 static CGFloat m2_ai_lock_bh = 0.0;
 static int m2_ai_lock_misses = 0;
+static BOOL m2_ai_motion_valid = NO;
+static CGFloat m2_ai_motion_x = 0.0;
+static CGFloat m2_ai_motion_y = 0.0;
+static CGFloat m2_ai_motion_vx = 0.0;
+static CGFloat m2_ai_motion_vy = 0.0;
+static CFAbsoluteTime m2_ai_motion_time = 0.0;
 static BOOL m2_ai_pending_valid = NO;
 static CGFloat m2_ai_pending_x = 0.0;
 static CGFloat m2_ai_pending_y = 0.0;
@@ -234,6 +240,112 @@ static CGRect m2_scaled_rect_for_buffer(M2HudRect r, CVImageBufferRef pix) {
 static CGFloat m2_ai_scaled_pixels(CGFloat pixels, int w, int h) {
     CGFloat shortSide = MIN((CGFloat)w, (CGFloat)h);
     return pixels * (shortSide / M2_HUD_BASE_H);
+}
+
+static CGFloat m2_ai_clamp_cg(CGFloat value, CGFloat minValue, CGFloat maxValue) {
+    return MIN(MAX(value, minValue), maxValue);
+}
+
+static void m2_ai_reset_motion_filter(void) {
+    m2_ai_motion_valid = NO;
+    m2_ai_motion_x = 0.0;
+    m2_ai_motion_y = 0.0;
+    m2_ai_motion_vx = 0.0;
+    m2_ai_motion_vy = 0.0;
+    m2_ai_motion_time = 0.0;
+}
+
+static void m2_ai_lock_anchor(int w, int h, CGFloat *outX, CGFloat *outY) {
+    CGFloat x = m2_ai_lock_x;
+    CGFloat y = m2_ai_lock_y;
+    if (m2_ai_motion_valid && m2_ai_motion_time > 0.0) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        CGFloat dt = (CGFloat)(now - m2_ai_motion_time);
+        if (dt > 0.0 && dt < 0.080) {
+            x = m2_ai_motion_x + m2_ai_motion_vx * dt;
+            y = m2_ai_motion_y + m2_ai_motion_vy * dt;
+            x = m2_ai_clamp_cg(x, 0.0, (CGFloat)w);
+            y = m2_ai_clamp_cg(y, 0.0, (CGFloat)h);
+        }
+    }
+    if (outX) *outX = x;
+    if (outY) *outY = y;
+}
+
+static void m2_ai_filter_target(CGFloat measuredX, CGFloat measuredY, BOOL smooth, int w, int h, CGFloat *outX, CGFloat *outY) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CGFloat dt = m2_ai_motion_time > 0.0 ? (CGFloat)(now - m2_ai_motion_time) : 0.0;
+    if (!smooth || !m2_ai_motion_valid || dt <= 0.0 || dt > 0.080) {
+        m2_ai_motion_valid = YES;
+        m2_ai_motion_x = measuredX;
+        m2_ai_motion_y = measuredY;
+        m2_ai_motion_vx = 0.0;
+        m2_ai_motion_vy = 0.0;
+        m2_ai_motion_time = now;
+        if (outX) *outX = measuredX;
+        if (outY) *outY = measuredY;
+        return;
+    }
+
+    CGFloat predX = m2_ai_motion_x + m2_ai_motion_vx * dt;
+    CGFloat predY = m2_ai_motion_y + m2_ai_motion_vy * dt;
+    CGFloat ex = measuredX - predX;
+    CGFloat ey = measuredY - predY;
+    CGFloat err = hypot(ex, ey);
+    CGFloat small = m2_ai_scaled_pixels(8.0, w, h);
+    CGFloat medium = m2_ai_scaled_pixels(28.0, w, h);
+    CGFloat large = m2_ai_scaled_pixels(85.0, w, h);
+    CGFloat alpha = 0.72;
+    CGFloat beta = 0.26;
+
+    if (err <= small) {
+        alpha = 0.38;
+        beta = 0.12;
+    }
+    else if (err <= medium) {
+        alpha = 0.58;
+        beta = 0.20;
+    }
+    else if (err >= large) {
+        alpha = 0.88;
+        beta = 0.34;
+    }
+
+    CGFloat x = predX + alpha * ex;
+    CGFloat y = predY + alpha * ey;
+    CGFloat maxVelocity = m2_ai_scaled_pixels(5200.0, w, h);
+    CGFloat vx = m2_ai_motion_vx + beta * ex / dt;
+    CGFloat vy = m2_ai_motion_vy + beta * ey / dt;
+    vx = m2_ai_clamp_cg(vx, -maxVelocity, maxVelocity);
+    vy = m2_ai_clamp_cg(vy, -maxVelocity, maxVelocity);
+
+    m2_ai_motion_x = m2_ai_clamp_cg(x, 0.0, (CGFloat)w);
+    m2_ai_motion_y = m2_ai_clamp_cg(y, 0.0, (CGFloat)h);
+    m2_ai_motion_vx = vx;
+    m2_ai_motion_vy = vy;
+    m2_ai_motion_time = now;
+    if (outX) *outX = m2_ai_motion_x;
+    if (outY) *outY = m2_ai_motion_y;
+}
+
+static void m2_ai_predict_hold_target(int w, int h, CGFloat *outX, CGFloat *outY) {
+    if (!m2_ai_motion_valid || m2_ai_motion_time <= 0.0) {
+        if (outX) *outX = m2_ai_lock_x;
+        if (outY) *outY = m2_ai_lock_y;
+        return;
+    }
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CGFloat dt = (CGFloat)(now - m2_ai_motion_time);
+    if (dt > 0.0 && dt < 0.080) {
+        m2_ai_motion_x = m2_ai_clamp_cg(m2_ai_motion_x + m2_ai_motion_vx * dt, 0.0, (CGFloat)w);
+        m2_ai_motion_y = m2_ai_clamp_cg(m2_ai_motion_y + m2_ai_motion_vy * dt, 0.0, (CGFloat)h);
+        m2_ai_motion_time = now;
+        m2_ai_lock_x = m2_ai_motion_x;
+        m2_ai_lock_y = m2_ai_motion_y;
+    }
+    if (outX) *outX = m2_ai_motion_x;
+    if (outY) *outY = m2_ai_motion_y;
 }
 
 static void m2_ai_clear_pending_target(void) {
@@ -705,6 +817,11 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     NSString *locked_label = @"unknown";
                     NSString *new_label = @"unknown";
                     CGFloat lockGate = MAX(MAX(m2_ai_scaled_pixels(165.0, w, h_px), m2_ai_lock_bw * 3.0), 90.0);
+                    CGFloat lockAnchorX = m2_ai_lock_x;
+                    CGFloat lockAnchorY = m2_ai_lock_y;
+                    if (m2_ai_lock_valid) {
+                        m2_ai_lock_anchor(w, h_px, &lockAnchorX, &lockAnchorY);
+                    }
 
                     for (VNRecognizedObjectObservation *o in m2_ai_request.results) {
                         if (o.confidence > AI_LOCK_CONFIDENCE_THRESHOLD) {
@@ -717,7 +834,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                             NSString *candidateLabel = label.identifier ?: @"unknown";
 
                             if (m2_ai_lock_valid) {
-                                CGFloat lockDist = hypot((CGFloat)tx - m2_ai_lock_x, (CGFloat)ty - m2_ai_lock_y);
+                                CGFloat lockDist = hypot((CGFloat)tx - lockAnchorX, (CGFloat)ty - lockAnchorY);
                                 if (lockDist <= lockGate) {
                                     float score = (float)(lockDist - (CGFloat)o.confidence * m2_ai_scaled_pixels(45.0, w, h_px));
                                     if (score < locked_score) {
@@ -791,18 +908,22 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     }
 
                     if (targetSelected) {
+                        CGFloat filteredX = (CGFloat)best_x;
+                        CGFloat filteredY = (CGFloat)best_y;
+                        BOOL smoothTarget = [best_source isEqualToString:@"lock"];
+                        m2_ai_filter_target((CGFloat)best_x, (CGFloat)best_y, smoothTarget, w, h_px, &filteredX, &filteredY);
                         float rawDx = (float)(best_x - w / 2);
                         float rawDy = (float)(best_y - h_px / 2);
-                        float dx = rawDx;
-                        float dy = rawDy;
+                        float dx = (float)(filteredX - w / 2.0);
+                        float dy = (float)(filteredY - h_px / 2.0);
                         m2_ai_miss_streak = 0;
                         m2_ai_lock_valid = YES;
                         m2_ai_lock_misses = 0;
-                        m2_ai_lock_x = (CGFloat)best_x;
-                        m2_ai_lock_y = (CGFloat)best_y;
+                        m2_ai_lock_x = filteredX;
+                        m2_ai_lock_y = filteredY;
                         m2_ai_lock_bw = best_bw;
                         m2_ai_lock_bh = best_bh;
-                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@ pos=%d,%d %@=%.0f size=%.0f dx=%.0f dy=%.0f %.0fms", best_label, best_conf, best_source, best_x, best_y, aiMode, cropW, best_bw, dx, dy, packetMs];
+                        m2_ai_debug_text = [NSString stringWithFormat:@"AI %@ %.2f %@ pos=%.0f,%.0f raw=%d,%d %@=%.0f size=%.0f dx=%.0f dy=%.0f r=%.0f,%.0f %.0fms", best_label, best_conf, best_source, filteredX, filteredY, best_x, best_y, aiMode, cropW, best_bw, dx, dy, rawDx, rawDy, packetMs];
                         char m[160];
                         snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, best_bw, best_bw, best_bh);
                         m2_send_ai_payload(m, (int)strlen(m));
@@ -810,8 +931,11 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     else if (m2_ai_lock_valid && m2_ai_lock_misses < M2_AI_HOLD_MISSES) {
                         m2_ai_miss_streak = MIN(m2_ai_miss_streak + 1, 1000);
                         m2_ai_lock_misses++;
-                        float dx = (float)(m2_ai_lock_x - w / 2.0);
-                        float dy = (float)(m2_ai_lock_y - h_px / 2.0);
+                        CGFloat holdX = m2_ai_lock_x;
+                        CGFloat holdY = m2_ai_lock_y;
+                        m2_ai_predict_hold_target(w, h_px, &holdX, &holdY);
+                        float dx = (float)(holdX - w / 2.0);
+                        float dy = (float)(holdY - h_px / 2.0);
                         m2_ai_debug_text = [NSString stringWithFormat:@"AI hold %@=%.0f miss=%d dx=%.0f dy=%.0f %.0fms", aiMode, cropW, m2_ai_lock_misses, dx, dy, packetMs];
                         char m[160];
                         snprintf(m, sizeof(m), "{\"f\":1,\"dx\":%.1f,\"dy\":%.1f,\"size\":%.1f,\"bw\":%.1f,\"bh\":%.1f}", dx, dy, m2_ai_lock_bw, m2_ai_lock_bw, m2_ai_lock_bh);
@@ -820,6 +944,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
                     else {
                         m2_ai_miss_streak = MIN(m2_ai_miss_streak + 1, 1000);
                         m2_ai_lock_valid = NO;
+                        m2_ai_reset_motion_filter();
                         if (new_x != -1) {
                             m2_ai_debug_text = [NSString stringWithFormat:@"AI cand %@ %.2f %@=%.0f hits=%d %.0fms", new_label, new_conf, aiMode, cropW, m2_ai_pending_hits, packetMs];
                         }
@@ -836,6 +961,7 @@ static void m2_run_ai(CVImageBufferRef pix, id renderer) {
             if (!sentPayload) {
                 m2_ai_miss_streak = MIN(m2_ai_miss_streak + 1, 1000);
                 m2_ai_lock_valid = NO;
+                m2_ai_reset_motion_filter();
                 m2_ai_clear_pending_target();
                 m2_ai_debug_text = @"AI request failed";
                 m2_send_ai_payload("{\"f\":0}", 7);
